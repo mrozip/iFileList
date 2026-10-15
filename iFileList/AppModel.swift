@@ -1,0 +1,335 @@
+import AppKit
+import FileIndexKit
+import Observation
+import Synchronization
+import UniformTypeIdentifiers
+
+/// App state: the index, the current query and its results, and indexing status.
+@MainActor
+@Observable
+final class AppModel {
+    static let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.mrozip.iFileList"
+
+    var query = "" {
+        didSet { if query != oldValue { runSearch() } }
+    }
+    var sortOrder = SortOrder.byName {
+        didSet { if sortOrder != oldValue { runSearch() } }
+    }
+    private(set) var results: [EntryID] = []
+    /// Increases each time `results` is replaced; the table reloads when it changes.
+    private(set) var resultsVersion = 0
+    private(set) var status = IndexStatus()
+    private(set) var hasFullDiskAccess = FullDiskAccess.isGranted
+    /// Full Disk Access was granted while running; a relaunch is needed to use it.
+    private(set) var needsRelaunchForAccess = false
+    /// First launch without Full Disk Access: the window explains it instead of showing the list.
+    private(set) var showsAccessOnboarding = false
+    /// Increments to ask the window to focus the search field.
+    private(set) var searchFocusRequest = 0
+
+    @ObservationIgnored let index: FileIndex
+    @ObservationIgnored private let coordinator: IndexCoordinator?
+    @ObservationIgnored private let engine: SearchEngine
+    @ObservationIgnored private let databaseURL: URL?
+    @ObservationIgnored private let searchGeneration = SearchGeneration()
+    @ObservationIgnored private var searchedVersion: UInt64 = 0
+    @ObservationIgnored private var throttledSearch: Task<Void, Never>?
+    @ObservationIgnored private var searchInFlight = false
+    @ObservationIgnored private var refreshPending = false
+    @ObservationIgnored private var lastSearchStart = Date.distantPast
+    @ObservationIgnored private var started = false
+    @ObservationIgnored private var observers: [NSObjectProtocol] = []
+    @ObservationIgnored private var folderPaths: [EntryID: String] = [:]
+    @ObservationIgnored private var icons = IconCache()
+
+    private static let skippedAccessKey = "skippedFullDiskAccess"
+
+    init() {
+        let relay = SortRelay()
+        var failure: String?
+        do {
+            let url = try StorageLocation.databaseURL(bundleIdentifier: Self.bundleIdentifier)
+            let coordinator = IndexCoordinator(options: .init(databaseURL: url, hasFullDiskAccess: FullDiskAccess.isGranted))
+            self.coordinator = coordinator
+            self.databaseURL = url
+            index = coordinator.index
+        } catch {
+            coordinator = nil
+            databaseURL = nil
+            index = FileIndex()
+            failure = "Cannot create the cache folder: \(error.localizedDescription)"
+        }
+        engine = SearchEngine(index: index) { key in
+            Task { @MainActor in relay.model?.sortOrderDidUpdate(key) }
+        }
+        relay.model = self
+        if let failure { status.phase = .failed(failure) }
+        observeWorkspace()
+    }
+
+    // MARK: Lifecycle
+
+    func windowAppeared() {
+        guard !started else { return }
+        let hasCache = databaseURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        if !hasFullDiskAccess && !hasCache && !UserDefaults.standard.bool(forKey: Self.skippedAccessKey) {
+            showsAccessOnboarding = true  // indexing starts once the user answers it
+        } else {
+            startIndexing()
+        }
+    }
+
+    func continueWithoutFullDiskAccess() {
+        UserDefaults.standard.set(true, forKey: Self.skippedAccessKey)
+        showsAccessOnboarding = false
+        startIndexing()
+    }
+
+    private func startIndexing() {
+        guard !started, let coordinator else { return }
+        started = true
+        Task { await coordinator.start() }
+        Task {
+            for await status in coordinator.statusUpdates {
+                apply(status)
+            }
+        }
+    }
+
+    func rescan() {
+        coordinator?.rescanAll()
+    }
+
+    func focusSearch() {
+        searchFocusRequest += 1
+    }
+
+    private func observeWorkspace() {
+        let center = NSWorkspace.shared.notificationCenter
+        let coordinator = coordinator
+        for name in [
+            NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification,
+            NSWorkspace.didRenameVolumeNotification,
+        ] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                coordinator?.volumesDidChange()
+            })
+        }
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.recheckFullDiskAccess() }
+        })
+    }
+
+    private func recheckFullDiskAccess() {
+        guard !hasFullDiskAccess, FullDiskAccess.isGranted else { return }
+        hasFullDiskAccess = true
+        needsRelaunchForAccess = true
+    }
+
+    // MARK: Status and search
+
+    private func apply(_ newStatus: IndexStatus) {
+        status = newStatus
+        switch newStatus.phase {
+        case .loading, .scanning, .starting:
+            engine.defersSorting = true
+        case .idle, .failed:
+            engine.defersSorting = false
+        }
+        if newStatus.indexVersion != searchedVersion { refreshResults() }
+    }
+
+    private func sortOrderDidUpdate(_ key: SortKey) {
+        if key == sortOrder.key { refreshResults() }
+    }
+
+    /// Re-runs the current search because the index changed. Unlike typing, this never cancels
+    /// a search in progress and runs at most once a second, so a steady stream of file system
+    /// changes can't keep the user's own search from finishing.
+    private func refreshResults() {
+        if searchInFlight {
+            refreshPending = true
+            return
+        }
+        let wait = 1 - Date().timeIntervalSince(lastSearchStart)
+        if wait <= 0 {
+            runSearch()
+        } else if throttledSearch == nil {
+            throttledSearch = Task {
+                try? await Task.sleep(for: .seconds(wait))
+                throttledSearch = nil
+                refreshResults()
+            }
+        }
+    }
+
+    /// Starts a search for the current query and order, cancelling any search in progress.
+    private func runSearch() {
+        lastSearchStart = Date()
+        searchInFlight = true
+        let generation = searchGeneration.next()
+        let token = searchGeneration
+        let (engine, query, order, version) = (engine, query, sortOrder, index.version)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let ids = engine.search(query, order: order, isCancelled: { token.current != generation })
+            await self?.finishSearch(ids, generation: generation, version: version)
+        }
+    }
+
+    private func finishSearch(_ ids: [EntryID]?, generation: Int, version: UInt64) {
+        // A newer search superseded this one and will report instead.
+        guard searchGeneration.current == generation else { return }
+        searchInFlight = false
+        if let ids {
+            results = ids
+            resultsVersion += 1
+            searchedVersion = version
+        }
+        if refreshPending {
+            refreshPending = false
+            refreshResults()
+        }
+    }
+
+    var isBusy: Bool {
+        switch status.phase {
+        case .starting: started
+        case .loading, .scanning: true
+        case .idle, .failed: false
+        }
+    }
+
+    var statusText: String {
+        var text: String
+        switch status.phase {
+        case .starting:
+            text = started ? "Starting…" : "Waiting to start"
+        case .loading(let entries):
+            text = "Loading file list… \(entries.formatted()) items"
+        case .scanning(let volume, let entries):
+            text = "Indexing “\(volume)”… \(entries.formatted()) items found"
+        case .idle:
+            text = query.isEmpty
+                ? "\(status.visibleEntries.formatted()) items"
+                : "\(results.count.formatted()) of \(status.visibleEntries.formatted()) items"
+        case .failed(let message):
+            return message
+        }
+        if status.unreadableDirectories > 0 {
+            text += " · \(status.unreadableDirectories.formatted()) folders unreadable"
+        }
+        return text
+    }
+
+    // MARK: Rows
+
+    func entry(at row: Int) -> EntrySnapshot? {
+        guard row >= 0, row < results.count else { return nil }
+        return index.snapshot(results[row])
+    }
+
+    func url(for id: EntryID) -> URL? {
+        index.path(of: id).map { URL(fileURLWithPath: $0) }
+    }
+
+    /// The name to show: volume roots are stored under their mount path.
+    func displayName(_ entry: EntrySnapshot) -> String {
+        guard entry.flags.contains(.volumeRoot) else { return entry.name }
+        return entry.name == "/" ? "/" : (entry.name as NSString).lastPathComponent
+    }
+
+    /// The containing folder's path, cached by folder ID (a folder's path never changes; renaming
+    /// it creates a new entry).
+    func folderPath(of entry: EntrySnapshot) -> String {
+        if entry.flags.contains(.volumeRoot) {
+            return entry.name == "/" ? "" : (entry.name as NSString).deletingLastPathComponent
+        }
+        if let cached = folderPaths[entry.parent] { return cached }
+        let path = index.path(of: entry.parent) ?? ""
+        if folderPaths.count > 50_000 { folderPaths.removeAll(keepingCapacity: true) }
+        folderPaths[entry.parent] = path
+        return path
+    }
+
+    func icon(for entry: EntrySnapshot) -> NSImage {
+        icons.icon(for: entry) { [index] in index.path(of: entry.id) }
+    }
+
+    // MARK: Actions
+
+    func open(_ ids: [EntryID]) {
+        guard !ids.isEmpty else { return }
+        if ids.count > 10 {
+            let alert = NSAlert()
+            alert.messageText = "Open \(ids.count) items?"
+            alert.addButton(withTitle: "Open")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        let missing = FileActions.open(ids.compactMap(url(for:)))
+        guard !missing.isEmpty else { return }
+        coordinator?.refresh(paths: missing.map(\.path))
+        let alert = NSAlert()
+        alert.messageText = missing.count == 1
+            ? "“\(missing[0].lastPathComponent)” no longer exists."
+            : "\(missing.count) items no longer exist."
+        alert.informativeText = "The list will be updated."
+        alert.runModal()
+    }
+
+    func revealInFinder(_ ids: [EntryID]) {
+        FileActions.revealInFinder(ids.compactMap(url(for:)))
+    }
+
+    func showInfo(_ ids: [EntryID]) {
+        FileActions.showInfo(ids.compactMap(url(for:)))
+    }
+}
+
+/// Lets the search engine's background callback reach the model created after it.
+@MainActor
+private final class SortRelay {
+    weak var model: AppModel?
+}
+
+/// The current search generation; older searches see it change and stop.
+final class SearchGeneration: Sendable {
+    private let value = Atomic<Int>(0)
+
+    func next() -> Int { value.wrappingAdd(1, ordering: .relaxed).newValue }
+    var current: Int { value.load(ordering: .relaxed) }
+}
+
+/// File icons: one per extension for ordinary files, per entry for apps and other packages.
+@MainActor
+struct IconCache {
+    private var byType: [String: NSImage] = [:]
+    private var byEntry: [EntryID: NSImage] = [:]
+    private let folder = NSWorkspace.shared.icon(for: .folder)
+    private let symlink = NSWorkspace.shared.icon(for: .symbolicLink)
+    private let document = NSWorkspace.shared.icon(for: .data)
+
+    mutating func icon(for entry: EntrySnapshot, path: () -> String?) -> NSImage {
+        if entry.flags.contains(.symlink) { return symlink }
+        let ext = (entry.name as NSString).pathExtension.lowercased()
+        let isPackage = entry.isDirectory && !ext.isEmpty
+            && (UTType(filenameExtension: ext)?.conforms(to: .package) ?? false)
+        if entry.flags.contains(.volumeRoot) || isPackage {
+            if let cached = byEntry[entry.id] { return cached }
+            guard let path = path() else { return folder }
+            let icon = NSWorkspace.shared.icon(forFile: path)
+            if byEntry.count > 5_000 { byEntry.removeAll(keepingCapacity: true) }
+            byEntry[entry.id] = icon
+            return icon
+        }
+        if entry.isDirectory { return folder }
+        guard !ext.isEmpty else { return document }
+        if let cached = byType[ext] { return cached }
+        let icon = NSWorkspace.shared.icon(for: UTType(filenameExtension: ext) ?? .data)
+        byType[ext] = icon
+        return icon
+    }
+}

@@ -18,6 +18,22 @@ open build/Build/Products/Debug/iFileList.app
 
 On a fresh Mac, `xcodebuild` may first ask you to run `sudo xcodebuild -runFirstLaunch`.
 
+## Building a DMG
+
+```sh
+scripts/make-dmg.sh
+```
+
+This builds a universal Release copy and writes `build/iFileList-<version>.dmg`, with an Applications shortcut to drag the app onto.
+
+Without a Developer ID the app is ad-hoc signed, so other Macs block the first launch. To open it there, use **Open Anyway** in **System Settings › Privacy & Security**. To sign and notarize it instead:
+
+```sh
+SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE=notary scripts/make-dmg.sh
+```
+
+`NOTARY_PROFILE` names credentials saved with `xcrun notarytool store-credentials`.
+
 ## Full Disk Access
 
 1. On first launch, click **Open System Settings**.

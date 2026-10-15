@@ -2,14 +2,6 @@
 
 A macOS app that lists every file on your Mac in one searchable list.
 
-### Keyboard shortcuts
-
-| Shortcut | Action |
-| --- | --- |
-| ⌘F | Focus the search field |
-| Return or ⌘↓ | Open the selected files |
-| ⌘R | Rescan all volumes |
-
 ## Requirements
 
 - macOS 15 or later
@@ -31,6 +23,14 @@ On a fresh Mac, `xcodebuild` may first ask you to run `sudo xcodebuild -runFirst
 1. On first launch, click **Open System Settings**.
 2. Turn on iFileList under **Privacy & Security › Full Disk Access**.
 3. Reopen the app when prompted.
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| ⌘F | Focus the search field |
+| Return or ⌘↓ | Open the selected files |
+| ⌘R | Rescan all volumes |
 
 ## Project layout
 

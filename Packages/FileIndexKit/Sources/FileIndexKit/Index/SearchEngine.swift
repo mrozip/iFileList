@@ -1,6 +1,7 @@
 import Foundation
 
-public enum SortKey: Sendable, Hashable {
+/// Raw values are saved in the app's preferences, so keep them when renaming a case.
+public enum SortKey: String, Sendable, Hashable {
     case name
     case size
     case dateModified

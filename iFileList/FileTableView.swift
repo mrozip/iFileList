@@ -31,11 +31,14 @@ struct FileTableView: NSViewRepresentable {
             if column == .size { tableColumn.headerCell.alignment = .right }
             tableView.addTableColumn(tableColumn)
         }
-        tableView.sortDescriptors = [NSSortDescriptor(key: Column.name.sortKey, ascending: true)]
         // Keyed by the column set, so adding or removing a column starts from the default layout
         // instead of a saved one that has no room for it.
         tableView.autosaveName = "FileList." + Column.allCases.map(\.rawValue).joined(separator: ",")
         tableView.autosaveTableColumns = true
+        // After the autosave name, which restores AppKit's own saved sort along with the column
+        // widths. The model saves the sort itself, so it survives a change to the column set.
+        let order = model.sortOrder
+        tableView.sortDescriptors = [NSSortDescriptor(key: Column(order.key).sortKey, ascending: order.ascending)]
 
         let coordinator = context.coordinator
         tableView.dataSource = coordinator
@@ -62,6 +65,16 @@ struct FileTableView: NSViewRepresentable {
 
     enum Column: String, CaseIterable {
         case name, folder, size, modified, created
+
+        /// The column sorted by `key`.
+        init(_ key: SortKey) {
+            self = switch key {
+            case .name: .name
+            case .size: .size
+            case .dateModified: .modified
+            case .dateCreated: .created
+            }
+        }
 
         var identifier: NSUserInterfaceItemIdentifier { NSUserInterfaceItemIdentifier(rawValue) }
 
@@ -268,14 +281,14 @@ struct FileTableView: NSViewRepresentable {
     }
 }
 
-/// Opens the selection with Return, like Finder's ⌘↓.
+/// Opens the selection with Return or ⌘O.
 final class FileListTableView: NSTableView {
     var onOpen: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
         let isReturn = event.keyCode == 36 || event.keyCode == 76
-        let isCommandDown = event.keyCode == 125 && event.modifierFlags.contains(.command)
-        if (isReturn || isCommandDown), let onOpen {
+        let isCommandO = event.charactersIgnoringModifiers == "o" && event.modifierFlags.contains(.command)
+        if (isReturn || isCommandO), let onOpen {
             onOpen()
         } else {
             super.keyDown(with: event)

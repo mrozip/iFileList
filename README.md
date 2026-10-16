@@ -45,7 +45,7 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE=nota
 | Shortcut | Action |
 | --- | --- |
 | ⌘F | Focus the search field |
-| Return or ⌘↓ | Open the selected files |
+| Return or ⌘O | Open the selected files |
 | ⌘R | Rescan all volumes |
 
 ## Project layout

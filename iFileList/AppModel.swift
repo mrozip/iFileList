@@ -13,8 +13,13 @@ final class AppModel {
     var query = "" {
         didSet { if query != oldValue { runSearch() } }
     }
-    var sortOrder = SortOrder.byName {
-        didSet { if sortOrder != oldValue { runSearch() } }
+    var sortOrder = AppModel.savedSortOrder {
+        didSet {
+            guard sortOrder != oldValue else { return }
+            UserDefaults.standard.set(sortOrder.key.rawValue, forKey: Self.sortKeyKey)
+            UserDefaults.standard.set(sortOrder.ascending, forKey: Self.sortAscendingKey)
+            runSearch()
+        }
     }
     private(set) var results: [EntryID] = []
     /// Increases each time `results` is replaced; the table reloads when it changes.
@@ -44,6 +49,15 @@ final class AppModel {
     @ObservationIgnored private var icons = IconCache()
 
     private static let skippedAccessKey = "skippedFullDiskAccess"
+    private static let sortKeyKey = "sortKey"
+    private static let sortAscendingKey = "sortAscending"
+
+    /// The sort the user last chose, or by name on first launch.
+    private static var savedSortOrder: FileIndexKit.SortOrder {
+        let defaults = UserDefaults.standard
+        guard let raw = defaults.string(forKey: sortKeyKey), let key = SortKey(rawValue: raw) else { return .byName }
+        return SortOrder(key: key, ascending: defaults.bool(forKey: sortAscendingKey))
+    }
 
     init() {
         let relay = SortRelay()

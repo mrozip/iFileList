@@ -7,7 +7,11 @@ A macOS app that lists every file on your Mac in one searchable list.
 - macOS 15 or later
 - Xcode 16 or later to build
 
-## Building and running
+## Installation
+
+Builds are available under the [Releases](https://github.com/mrozip/iFileList/releases) section.
+
+## Building
 
 Open `iFileList.xcodeproj` in Xcode and run the **iFileList** scheme, or build from the command line:
 
@@ -18,7 +22,7 @@ open build/Build/Products/Debug/iFileList.app
 
 On a fresh Mac, `xcodebuild` may first ask you to run `sudo xcodebuild -runFirstLaunch`.
 
-## Building a DMG
+### Building a DMG
 
 ```sh
 scripts/make-dmg.sh
@@ -40,6 +44,18 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE=nota
 2. Turn on iFileList under **Privacy & Security › Full Disk Access**.
 3. Reopen the app when prompted.
 
+## Searching
+
+Currently, searching by filename or path is supported.
+
+## Settings
+
+Open **iFileList › Settings…** (⌘,) to choose what is indexed. The startup disk is always indexed.
+
+- **Index external drives**: USB, Thunderbolt, mounted disk images.
+- **Index network drives**: Mounted network shares. Requires a full rescan (⌘R) or restart.
+- **Excluded from Index**: Files and folders to exclude from indexing.
+
 ## Keyboard shortcuts
 
 | Shortcut | Action |
@@ -47,6 +63,7 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE=nota
 | ⌘F | Focus the search field |
 | Return or ⌘O | Open the selected files |
 | ⌘R | Rescan all volumes |
+| ⌘, | Open Settings |
 
 ## Project layout
 

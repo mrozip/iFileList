@@ -43,7 +43,7 @@ struct BootVolumeBenchmark {
         #expect(!duplicated)
 
         let engine = SearchEngine(index: index)
-        for query in ["", "a", "plist", "info plist", "zzzzqq"] {
+        for query in ["", "a", "plist", "info plist", "library/caches", "system library plist", "zzzzqq"] {
             start = Date()
             let count = engine.search(query, order: .byName)?.count ?? -1
             print("BENCH search '\(query)': \(count) results in \(String(format: "%.1f", Date().timeIntervalSince(start) * 1000)) ms")

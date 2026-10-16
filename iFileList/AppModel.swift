@@ -21,6 +21,17 @@ final class AppModel {
             runSearch()
         }
     }
+    /// What is indexed besides the startup disk; edited in the Settings window.
+    var indexSettings = AppModel.savedIndexSettings {
+        didSet {
+            guard indexSettings != oldValue else { return }
+            let defaults = UserDefaults.standard
+            defaults.set(indexSettings.indexesExternalVolumes, forKey: Self.externalVolumesKey)
+            defaults.set(indexSettings.indexesNetworkVolumes, forKey: Self.networkVolumesKey)
+            defaults.set(indexSettings.excludedPaths, forKey: Self.excludedPathsKey)
+            coordinator?.update(settings: indexSettings)
+        }
+    }
     private(set) var results: [EntryID] = []
     /// Increases each time `results` is replaced; the table reloads when it changes.
     private(set) var resultsVersion = 0
@@ -51,6 +62,9 @@ final class AppModel {
     private static let skippedAccessKey = "skippedFullDiskAccess"
     private static let sortKeyKey = "sortKey"
     private static let sortAscendingKey = "sortAscending"
+    private static let externalVolumesKey = "indexExternalVolumes"
+    private static let networkVolumesKey = "indexNetworkVolumes"
+    private static let excludedPathsKey = "excludedPaths"
 
     /// The sort the user last chose, or by name on first launch.
     private static var savedSortOrder: FileIndexKit.SortOrder {
@@ -59,12 +73,22 @@ final class AppModel {
         return SortOrder(key: key, ascending: defaults.bool(forKey: sortAscendingKey))
     }
 
+    /// The settings the user last chose; on first launch only the startup disk is indexed.
+    private static var savedIndexSettings: IndexSettings {
+        let defaults = UserDefaults.standard
+        return IndexSettings(
+            indexesExternalVolumes: defaults.bool(forKey: externalVolumesKey),
+            indexesNetworkVolumes: defaults.bool(forKey: networkVolumesKey),
+            excludedPaths: defaults.stringArray(forKey: excludedPathsKey) ?? [])
+    }
+
     init() {
         let relay = SortRelay()
         var failure: String?
         do {
             let url = try StorageLocation.databaseURL(bundleIdentifier: Self.bundleIdentifier)
-            let coordinator = IndexCoordinator(options: .init(databaseURL: url, hasFullDiskAccess: FullDiskAccess.isGranted))
+            let coordinator = IndexCoordinator(options: .init(
+                databaseURL: url, hasFullDiskAccess: FullDiskAccess.isGranted, settings: Self.savedIndexSettings))
             self.coordinator = coordinator
             self.databaseURL = url
             index = coordinator.index
@@ -117,6 +141,23 @@ final class AppModel {
 
     func focusSearch() {
         searchFocusRequest += 1
+    }
+
+    // MARK: Settings
+
+    /// Adds files and folders to the excluded list, under the paths the index lists them by.
+    /// The startup disk as a whole can't be excluded.
+    func addExclusions(_ urls: [URL]) {
+        var paths = Set(indexSettings.excludedPaths)
+        for url in urls where url.isFileURL {
+            let path = VolumeCatalog.canonicalPath(url.path(percentEncoded: false))
+            if path != "/" { paths.insert(path) }
+        }
+        indexSettings.excludedPaths = paths.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    func removeExclusions(_ paths: Set<String>) {
+        indexSettings.excludedPaths.removeAll(where: paths.contains)
     }
 
     private func observeWorkspace() {

@@ -25,6 +25,11 @@ struct iFileListApp: App {
             }
         }
 
+        // Adds iFileList › Settings… (⌘,) to the app menu.
+        Settings {
+            SettingsView(model: model)
+        }
+
         Window("About iFileList", id: AboutView.windowID) {
             AboutView()
                 .windowMinimizeBehavior(.disabled)

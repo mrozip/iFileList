@@ -8,16 +8,19 @@ public struct VolumeInfo: Sendable, Hashable {
     public var name: String
     public var device: Int32
     public var isBoot: Bool
+    /// A network share (SMB, NFS, …) rather than a drive connected to this Mac.
+    public var isNetwork = false
 }
 
 /// Decides which volumes and folders are indexed.
 public enum VolumeCatalog {
     public static let bootKey = "boot"
 
-    /// Mounted volumes worth indexing: the startup disk plus local, browsable volumes.
+    /// Mounted volumes that can be indexed: the startup disk plus browsable volumes, local or
+    /// network. `IndexSettings` decides which of them are.
     ///
     /// "Browsable" excludes system-internal mounts (Preboot, VM, Recovery) and Time Machine
-    /// destinations and snapshots, which are all mounted `nobrowse`. "Local" excludes network shares.
+    /// destinations and snapshots, which are all mounted `nobrowse`.
     public static func mountedVolumes() -> [VolumeInfo] {
         let keys: [URLResourceKey] = [
             .volumeIsLocalKey, .volumeIsBrowsableKey, .volumeUUIDStringKey, .volumeNameKey,
@@ -29,9 +32,7 @@ public enum VolumeCatalog {
             guard let values = try? url.resourceValues(forKeys: Set(keys)) else { return nil }
             let path = normalizedPath(url.path(percentEncoded: false))
             let isBoot = values.volumeIsRootFileSystem ?? (path == "/")
-            guard isBoot || isIndexable(
-                isLocal: values.volumeIsLocal ?? false, isBrowsable: values.volumeIsBrowsable ?? false,
-                mountPath: path)
+            guard isBoot || isIndexable(isBrowsable: values.volumeIsBrowsable ?? false, mountPath: path)
             else { return nil }
             var info = stat()
             guard lstat(path, &info) == 0 else { return nil }
@@ -40,12 +41,13 @@ public enum VolumeCatalog {
                 mountPath: path,
                 name: values.volumeName ?? path,
                 device: info.st_dev,
-                isBoot: isBoot)
+                isBoot: isBoot,
+                isNetwork: !isBoot && !(values.volumeIsLocal ?? false))
         }
     }
 
-    static func isIndexable(isLocal: Bool, isBrowsable: Bool, mountPath: String) -> Bool {
-        isLocal && isBrowsable && !mountPath.hasPrefix("/Volumes/.") && !mountPath.hasPrefix("/System/Volumes/")
+    static func isIndexable(isBrowsable: Bool, mountPath: String) -> Bool {
+        isBrowsable && !mountPath.hasPrefix("/Volumes/.") && !mountPath.hasPrefix("/System/Volumes/")
     }
 
     /// Folders on the startup disk whose contents are not scanned: other volumes' mount areas
@@ -71,14 +73,40 @@ public enum VolumeCatalog {
         })
     }
 
-    /// Firmlinks as (path on the system volume, path relative to the Data volume root).
+    /// Firmlinks as (path on the system volume, path relative to the Data volume root), longest
+    /// target first so the first match is the most specific.
     public static func firmlinks() -> [(source: String, target: String)] {
         guard let text = try? String(contentsOfFile: "/usr/share/firmlinks", encoding: .utf8) else { return [] }
-        return text.split(separator: "\n").compactMap { line in
+        let links = text.split(separator: "\n").compactMap { line -> (source: String, target: String)? in
             let parts = line.split(separator: "\t", maxSplits: 1)
             guard parts.count == 2 else { return nil }
             return (String(parts[0]), String(parts[1]))
         }
+        return links.sorted { $0.target.count > $1.target.count }
+    }
+
+    /// Maps a path on the Data volume (`/System/Volumes/Data/...`) to the path the startup disk's
+    /// walk reaches it by, through a firmlink. Other paths are returned unchanged; Data-volume
+    /// paths outside every firmlink, which the walk never reaches, return nil.
+    static func pathThroughFirmlinks(_ path: String, firmlinks: [(source: String, target: String)]) -> String? {
+        let dataRoot = "/System/Volumes/Data"
+        guard path.hasPrefix(dataRoot + "/") else { return path }
+        let relative = path.dropFirst(dataRoot.count + 1)
+        guard let link = firmlinks.first(where: { relative == $0.target || relative.hasPrefix($0.target + "/") })
+        else { return nil }
+        return link.source + relative.dropFirst(link.target.count)
+    }
+
+    /// The path under which the index lists the item at `path`: symlinks resolved, Data-volume
+    /// paths mapped through their firmlink, and no trailing slash.
+    public static func canonicalPath(_ path: String) -> String {
+        var resolved = path
+        if let real = realpath(path, nil) {
+            resolved = String(cString: real)
+            free(real)
+        }
+        resolved = normalizedPath(resolved)
+        return pathThroughFirmlinks(resolved, firmlinks: firmlinks()) ?? resolved
     }
 
     static func normalizedPath(_ path: String) -> String {

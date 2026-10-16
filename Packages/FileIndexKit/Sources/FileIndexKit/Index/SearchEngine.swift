@@ -20,9 +20,10 @@ public struct SortOrder: Sendable, Hashable {
     public static let byName = SortOrder(key: .name, ascending: true)
 }
 
-/// Filters the index by name and returns entry IDs in the requested order.
+/// Filters the index by full path and returns entry IDs in the requested order.
 ///
-/// Matching is a parallel substring scan over the contiguous name buffer. Each sort order is a
+/// Each term becomes a `PathPattern`: one pass over the directories, then a parallel scan over the
+/// contiguous name buffer that continues from each entry's folder. Each sort order is a
 /// cached permutation of all visible IDs, rebuilt in the background when the index changes;
 /// filtering it keeps results sorted. Entries added since the last rebuild follow the sorted part.
 public final class SearchEngine: @unchecked Sendable {
@@ -54,41 +55,39 @@ public final class SearchEngine: @unchecked Sendable {
         set { lock.withLock { deferred = newValue } }
     }
 
-    /// Returns visible IDs whose names contain every term of `query`, or nil if cancelled.
+    /// Returns visible IDs whose full paths contain every term of `query`, or nil if cancelled.
+    /// A path ends with the entry's name, so a term matches names and folder names alike.
     public func search(
         _ query: String, order: SortOrder, isCancelled: @escaping @Sendable () -> Bool = { false }
     ) -> [EntryID]? {
         let terms = NameFolding.terms(of: query)
-        // Terms are copied into raw buffers so the hot loop does no reference counting.
-        let termBuffers = UnsafeMutableBufferPointer<UnsafeBufferPointer<UInt8>>.allocate(capacity: terms.count)
-        for (i, term) in terms.enumerated() {
-            let buffer = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: max(term.count, 1))
-            _ = buffer.initialize(from: term)
-            termBuffers[i] = UnsafeBufferPointer(rebasing: buffer[0..<term.count])
-        }
-        defer {
-            termBuffers.forEach { UnsafeMutableRawPointer(mutating: $0.baseAddress)?.deallocate() }
-            termBuffers.deallocate()
-        }
+        guard terms.allSatisfy({ $0.count <= PathPattern.maxTermLength }) else { return [] }
 
         let cached = lock.withLock { sorted[order.key] }
         let result: [EntryID]? = index.read { reader in
-            var head: [EntryID] = []
-            var tailStart = 1
-            let termBuffers = UnsafeBufferPointer(termBuffers)
-            if let cached {
-                guard let matches = cached.ids.withUnsafeBufferPointer({
-                    Self.filter(reader, termBuffers, candidates: $0, range: 0..<$0.count, isCancelled)
-                }) else { return nil }
-                head = order.ascending ? matches : matches.reversed()
-                tailStart = cached.slotCount
+            var patterns: [PathPattern] = []
+            defer { patterns.forEach { $0.deallocate() } }
+            for term in terms {
+                guard let pattern = PathPattern(term, reader: reader, isCancelled: isCancelled) else { return nil }
+                patterns.append(pattern)
             }
-            guard let tail = Self.filter(
-                reader, termBuffers, candidates: nil, range: tailStart..<max(tailStart, reader.slotCount),
-                isCancelled)
-            else { return nil }
-            head.append(contentsOf: tail)
-            return head
+            return patterns.withUnsafeBufferPointer { patterns in
+                var head: [EntryID] = []
+                var tailStart = 1
+                if let cached {
+                    guard let matches = cached.ids.withUnsafeBufferPointer({
+                        Self.filter(reader, patterns, candidates: $0, range: 0..<$0.count, isCancelled)
+                    }) else { return nil }
+                    head = order.ascending ? matches : matches.reversed()
+                    tailStart = cached.slotCount
+                }
+                guard let tail = Self.filter(
+                    reader, patterns, candidates: nil, range: tailStart..<max(tailStart, reader.slotCount),
+                    isCancelled)
+                else { return nil }
+                head.append(contentsOf: tail)
+                return head
+            }
         }
         scheduleSortIfNeeded(order.key)
         return result
@@ -97,7 +96,7 @@ public final class SearchEngine: @unchecked Sendable {
     /// Filters candidates in parallel chunks, preserving their order. With `candidates` nil the
     /// candidates are the IDs in `range`; otherwise `range` indexes into `candidates`.
     private static func filter(
-        _ reader: FileIndex.Reader, _ terms: UnsafeBufferPointer<UnsafeBufferPointer<UInt8>>,
+        _ reader: FileIndex.Reader, _ patterns: UnsafeBufferPointer<PathPattern>,
         candidates: UnsafeBufferPointer<EntryID>?, range: Range<Int>,
         _ isCancelled: @escaping @Sendable () -> Bool
     ) -> [EntryID]? {
@@ -106,7 +105,7 @@ public final class SearchEngine: @unchecked Sendable {
         let chunkSize = 32_768
         let chunkCount = (total + chunkSize - 1) / chunkSize
         var partials = [[EntryID]](repeating: [], count: chunkCount)
-        nonisolated(unsafe) let terms = terms
+        nonisolated(unsafe) let patterns = patterns
         nonisolated(unsafe) let candidates = candidates
         partials.withUnsafeMutableBufferPointer { output in
             nonisolated(unsafe) let output = output
@@ -118,12 +117,12 @@ public final class SearchEngine: @unchecked Sendable {
                 if let candidates {
                     for k in lower..<upper {
                         let id = candidates[k]
-                        if reader.isVisible(id) && reader.matches(id, terms) { local.append(id) }
+                        if reader.isVisible(id) && matchesAll(reader, id, patterns) { local.append(id) }
                     }
                 } else {
                     for k in lower..<upper {
                         let id = EntryID(k)
-                        if reader.isVisible(id) && reader.matches(id, terms) { local.append(id) }
+                        if reader.isVisible(id) && matchesAll(reader, id, patterns) { local.append(id) }
                     }
                 }
                 output[chunk] = local
@@ -134,6 +133,18 @@ public final class SearchEngine: @unchecked Sendable {
         result.reserveCapacity(partials.reduce(0) { $0 + $1.count })
         for partial in partials { result.append(contentsOf: partial) }
         return result
+    }
+
+    @inline(__always)
+    private static func matchesAll(
+        _ reader: FileIndex.Reader, _ id: EntryID, _ patterns: UnsafeBufferPointer<PathPattern>
+    ) -> Bool {
+        var i = 0
+        while i < patterns.count {
+            if !patterns[i].matches(reader, id) { return false }
+            i += 1
+        }
+        return true
     }
 
     // MARK: Sort orders

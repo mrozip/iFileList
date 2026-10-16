@@ -28,13 +28,16 @@ public actor IndexCoordinator {
     public struct Options: Sendable {
         public var databaseURL: URL
         public var hasFullDiskAccess: Bool
+        /// The settings to start with; `update(settings:)` changes them later.
+        public var settings: IndexSettings
         public var eventLatency: TimeInterval = 1.0
         var ignoresOwnEvents = true
         var volumeProvider: @Sendable () -> [VolumeInfo] = VolumeCatalog.mountedVolumes
 
-        public init(databaseURL: URL, hasFullDiskAccess: Bool) {
+        public init(databaseURL: URL, hasFullDiskAccess: Bool, settings: IndexSettings = IndexSettings()) {
             self.databaseURL = databaseURL
             self.hasFullDiskAccess = hasFullDiskAccess
+            self.settings = settings
         }
     }
 
@@ -43,6 +46,8 @@ public actor IndexCoordinator {
         case events([FSEvent])
         case refreshVolumes
         case rescanAll
+        case applySettings
+        case scanDeferredVolumes
         case barrier(CheckedContinuation<Void, Never>)
     }
 
@@ -55,15 +60,19 @@ public actor IndexCoordinator {
 
     private static let lastEventKey = "last_event_id"
     private static let fullDiskAccessKey = "full_disk_access"
+    private static let excludedPathsKey = "excluded_paths"
 
     public nonisolated let index = FileIndex()
     public nonisolated let statusUpdates: AsyncStream<IndexStatus>
     private nonisolated let statusContinuation: AsyncStream<IndexStatus>.Continuation
     private nonisolated let jobs: AsyncStream<Job>
     private nonisolated let jobContinuation: AsyncStream<Job>.Continuation
+    /// The latest settings asked for; `settings` catches up when the queued job runs.
+    private nonisolated let requestedSettings: LockedValue<IndexSettings>
     private let logger = Logger(subsystem: "com.mrozip.iFileList", category: "index")
 
     private let options: Options
+    private var settings: IndexSettings
     private let cacheDirectory: String
     private let firmlinks: [(source: String, target: String)]
     private let itemReader = DirectoryReader()
@@ -75,11 +84,18 @@ public actor IndexCoordinator {
     private var status = IndexStatus()
     private var unreadable: [String: Int] = [:]
     private var started = false
+    /// Volumes whose startup scan waits until the startup disk has caught up on changes made
+    /// while the app was closed, so the startup disk comes first.
+    private var deferredScans: [VolumeInfo] = []
+    /// How long deferred scans wait for FSEvents to finish replaying history before running anyway.
+    private static let deferredScanTimeout: Duration = .seconds(60)
 
     public init(options: Options) {
         self.options = options
+        settings = options.settings
+        requestedSettings = LockedValue(options.settings)
         cacheDirectory = VolumeCatalog.normalizedPath(options.databaseURL.deletingLastPathComponent().path)
-        firmlinks = VolumeCatalog.firmlinks().sorted { $0.target.count > $1.target.count }
+        firmlinks = VolumeCatalog.firmlinks()
         (statusUpdates, statusContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
         (jobs, jobContinuation) = AsyncStream.makeStream()
     }
@@ -107,6 +123,13 @@ public actor IndexCoordinator {
         jobContinuation.yield(.events(paths.map { FSEvent(path: $0, flags: [], id: 0) }))
     }
 
+    /// Changes which volumes and paths are indexed. Applied after the work already queued, such as
+    /// a scan in progress; changes made meanwhile are applied together.
+    public nonisolated func update(settings: IndexSettings) {
+        requestedSettings.update { $0 = settings }
+        jobContinuation.yield(.applySettings)
+    }
+
     /// Waits until every job queued so far has finished.
     public nonisolated func waitForPendingWork() async {
         await withCheckedContinuation { jobContinuation.yield(.barrier($0)) }
@@ -125,6 +148,8 @@ public actor IndexCoordinator {
             case .events(let events): await applyEvents(events)
             case .refreshVolumes: await refreshVolumes()
             case .rescanAll: await rescanAllVolumes()
+            case .applySettings: await applySettings()
+            case .scanDeferredVolumes: await scanDeferredVolumes()
             case .barrier(let continuation): continuation.resume()
             }
         }
@@ -143,6 +168,7 @@ public actor IndexCoordinator {
     // MARK: Startup
 
     private func startup() async {
+        settings = requestedSettings.value
         publish(.loading(entries: 0))
         let database: IndexDatabase
         do {
@@ -161,7 +187,7 @@ public actor IndexCoordinator {
             try database.compactIDsIfNeeded()
             ids = IDAllocator(startingAt: try database.maxEntryID() + 1)
 
-            let mounted = options.volumeProvider()
+            let mounted = indexableVolumes()
             let lastEventID = try database.value(forKey: Self.lastEventKey).flatMap(UInt64.init)
             let scannedWithFullDiskAccess = try database.value(forKey: Self.fullDiskAccessKey) == "1"
 
@@ -204,13 +230,29 @@ public actor IndexCoordinator {
 
             // Watch before scanning so changes made during the scans are queued, not missed.
             let since = replaysHistory ? lastEventID! : FSEventsWatcher.currentEventID
-            startWatching(since: since, volumes: mounted)
+            let watching = startWatching(since: since, volumes: mounted)
             if !replaysHistory {
                 try database.setValue(String(since), forKey: Self.lastEventKey)
             }
 
-            for info in toScan.sorted(by: { $0.isBoot && !$1.isBoot }) {
-                await scanVolume(info, replacing: volumes[info.key])
+            // The exclusions may have changed after the cache was last brought up to date.
+            let cachedExclusions = try database.value(forKey: Self.excludedPathsKey).map(Self.decodePaths) ?? []
+            await applyExclusionChanges(from: cachedExclusions)
+
+            let scans = toScan.sorted(by: { Self.scanPriority($0) < Self.scanPriority($1) })
+            if replaysHistory && watching {
+                // The startup disk catches up from FSEvents history, which arrives as jobs after
+                // this one; the other volumes are scanned once the history is done.
+                deferredScans = scans
+                let jobContinuation = jobContinuation
+                Task {
+                    try? await Task.sleep(for: Self.deferredScanTimeout)
+                    jobContinuation.yield(.scanDeferredVolumes)
+                }
+            } else {
+                for info in scans {
+                    await scanVolume(info, replacing: volumes[info.key])
+                }
             }
             publish(.idle)
         } catch {
@@ -219,18 +261,19 @@ public actor IndexCoordinator {
         }
     }
 
-    private func startWatching(since: UInt64, volumes: [VolumeInfo]) {
+    /// Returns false if the stream couldn't be started.
+    @discardableResult
+    private func startWatching(since: UInt64, volumes: [VolumeInfo]) -> Bool {
         let jobContinuation = jobContinuation
         let watcher = FSEventsWatcher(ignoresOwnEvents: options.ignoresOwnEvents) { events in
             jobContinuation.yield(.events(events))
         }
         let paths = volumes.contains(where: \.isBoot) ? ["/"] : volumes.map(\.mountPath)
-        if !watcher.start(
+        let started = watcher.start(
             paths: paths, sinceEventID: since, latency: options.eventLatency, excluding: [cacheDirectory])
-        {
-            logger.error("Could not start FSEvents stream")
-        }
+        if !started { logger.error("Could not start FSEvents stream") }
         self.watcher = watcher
+        return started
     }
 
     // MARK: Scanning
@@ -245,12 +288,14 @@ public actor IndexCoordinator {
             configuration.excludedPaths.insert(cacheDirectory)
             configuration.devices = [info.device]
         }
+        configuration.omittedPaths = Set(settings.excludedPaths)
         return configuration
     }
 
     /// Scans a volume into a new, hidden generation, then swaps it in for `old` in one step,
     /// so the list is never empty or doubled while a rescan runs.
     private func scanVolume(_ info: VolumeInfo, replacing old: IndexedVolume?) async {
+        deferredScans.removeAll { $0.key == info.key }
         guard let database, let slot = freeSlots.popLast() else { return }
         let hidden = old != nil
         let configuration = scanConfiguration(for: info)
@@ -343,8 +388,21 @@ public actor IndexCoordinator {
 
     // MARK: Volumes
 
+    /// Mounted volumes the settings include, in the order to scan them.
+    private func indexableVolumes() -> [VolumeInfo] {
+        options.volumeProvider().filter(settings.includes)
+            .sorted { Self.scanPriority($0) < Self.scanPriority($1) }
+    }
+
+    /// Every scan of several volumes goes fastest to slowest: the startup disk, then external
+    /// drives, then network volumes. Scans run one at a time, so a slow server never holds up the
+    /// local disks.
+    private static func scanPriority(_ info: VolumeInfo) -> Int {
+        info.isBoot ? 0 : info.isNetwork ? 2 : 1
+    }
+
     private func refreshVolumes() async {
-        let mounted = options.volumeProvider()
+        let mounted = indexableVolumes()
         for volume in volumes.values where !volume.info.isBoot {
             if !mounted.contains(where: { $0.key == volume.info.key && $0.mountPath == volume.info.mountPath }) {
                 removeVolume(volume)
@@ -357,6 +415,7 @@ public actor IndexCoordinator {
     }
 
     private func removeVolume(_ volume: IndexedVolume) {
+        deferredScans.removeAll { $0.key == volume.info.key }
         do {
             try database?.deleteVolume(volume.record.id)
         } catch {
@@ -368,14 +427,78 @@ public actor IndexCoordinator {
         unreadable[volume.info.key] = nil
     }
 
+    /// Runs the startup scans that waited for the startup disk to catch up.
+    private func scanDeferredVolumes() async {
+        while let info = deferredScans.first {
+            await scanVolume(info, replacing: volumes[info.key])
+        }
+    }
+
     private func rescanAllVolumes() async {
-        let mounted = options.volumeProvider()
+        let mounted = indexableVolumes()
         for volume in volumes.values where !mounted.contains(where: { $0.key == volume.info.key }) {
             removeVolume(volume)
         }
-        for info in mounted.sorted(by: { $0.isBoot && !$1.isBoot }) {
+        for info in mounted {
             await scanVolume(info, replacing: volumes[info.key])
         }
+    }
+
+    // MARK: Settings
+
+    private func applySettings() async {
+        let requested = requestedSettings.value
+        // Before startup there is nothing to change; startup reads the requested settings itself.
+        guard database != nil, requested != settings else { return }
+        let previousExclusions = settings.excludedPaths
+        settings = requested
+        for (key, volume) in volumes {
+            volumes[key]?.configuration = scanConfiguration(for: volume.info)
+        }
+        await applyExclusionChanges(from: previousExclusions)
+        await refreshVolumes()
+    }
+
+    /// Brings the index in line with `settings.excludedPaths` after it changed from `old`: removes
+    /// newly excluded items and reads back ones no longer excluded. Volume configurations must
+    /// already reflect the new exclusions. Whole volumes are left to `refreshVolumes()`.
+    private func applyExclusionChanges(from old: [String]) async {
+        guard let database else { return }
+        let new = settings.excludedPaths
+        let added = Set(new).subtracting(old)
+        let removed = Set(old).subtracting(new)
+        guard !added.isEmpty || !removed.isEmpty else { return }
+        let mountPaths = Set(volumes.values.map(\.info.mountPath))
+
+        do {
+            try database.beginTransaction()
+            do {
+                for path in added where !mountPaths.contains(path) {
+                    if let id = try entryID(at: path) { try deleteSubtree(id, includingRoot: true) }
+                }
+                // Parents first, so an item inside another one no longer excluded is read once.
+                for path in removed.sorted(by: { $0.utf8.count < $1.utf8.count }) where !mountPaths.contains(path) {
+                    try await apply(path: path)
+                }
+                try database.setValue(Self.encodePaths(new), forKey: Self.excludedPathsKey)
+                try database.commit()
+            } catch {
+                database.rollback()
+                throw error
+            }
+        } catch {
+            logger.error("Applying excluded paths failed: \(error); rescanning")
+            jobContinuation.yield(.rescanAll)
+        }
+        publish(.idle)
+    }
+
+    private static func encodePaths(_ paths: [String]) -> String {
+        (try? JSONEncoder().encode(paths)).map { String(decoding: $0, as: UTF8.self) } ?? "[]"
+    }
+
+    private static func decodePaths(_ text: String) -> [String] {
+        (try? JSONDecoder().decode([String].self, from: Data(text.utf8))) ?? []
     }
 
     // MARK: Live updates
@@ -388,10 +511,14 @@ public actor IndexCoordinator {
         var subtreeRescans: [String] = []
         var volumesChanged = false
         var historyLost = false
+        var historyDone = false
 
         for event in events {
             latestID = max(latestID, event.id)
-            if event.flags.contains(.historyDone) { continue }
+            if event.flags.contains(.historyDone) {
+                historyDone = true
+                continue
+            }
             if event.flags.contains(.eventIDsWrapped) {
                 historyLost = true
                 continue
@@ -416,14 +543,19 @@ public actor IndexCoordinator {
             return
         }
 
-        // Whole-volume rescans run outside the transaction; they commit on their own.
+        // Whole-volume rescans run outside the transaction; they commit on their own. Each volume
+        // is scanned once, in the usual order.
+        var volumeRescans: [VolumeInfo] = []
         var rescansInside: [String] = []
         for path in subtreeRescans {
             if let located = locate(path), located.components.isEmpty {
-                await scanVolume(located.volume.info, replacing: located.volume)
+                if !volumeRescans.contains(located.volume.info) { volumeRescans.append(located.volume.info) }
             } else {
                 rescansInside.append(path)
             }
+        }
+        for info in volumeRescans.sorted(by: { Self.scanPriority($0) < Self.scanPriority($1) }) {
+            await scanVolume(info, replacing: volumes[info.key])
         }
 
         do {
@@ -445,38 +577,57 @@ public actor IndexCoordinator {
             jobContinuation.yield(.rescanAll)
         }
         publish(.idle)
+        if historyDone { await scanDeferredVolumes() }
     }
 
     /// Maps FSEvents paths onto indexed paths: Data-volume paths go through their firmlink, and
     /// changes in this app's own cache are ignored.
     private func normalize(_ raw: String) -> String? {
-        var path = VolumeCatalog.normalizedPath(raw)
-        let dataRoot = "/System/Volumes/Data"
-        if path.hasPrefix(dataRoot + "/") {
-            let relative = String(path.dropFirst(dataRoot.count + 1))
-            guard let link = firmlinks.first(where: { relative == $0.target || relative.hasPrefix($0.target + "/") })
-            else { return nil }
-            path = link.source + relative.dropFirst(link.target.count)
-        }
+        guard let path = VolumeCatalog.pathThroughFirmlinks(VolumeCatalog.normalizedPath(raw), firmlinks: firmlinks)
+        else { return nil }
         if path == cacheDirectory || path.hasPrefix(cacheDirectory + "/") { return nil }
         return path
     }
 
     /// The indexed volume containing `path` and the path components below its root, or nil if
-    /// the path is outside every indexed volume or inside an excluded folder.
+    /// the path is outside every indexed volume, inside an excluded folder, or left out by the settings.
     private func locate(_ path: String) -> (volume: IndexedVolume, components: [String])? {
+        guard let volume = volume(containing: path) else { return nil }
+        for excluded in volume.configuration.excludedPaths where path.hasPrefix(excluded + "/") {
+            return nil
+        }
+        for omitted in volume.configuration.omittedPaths where path == omitted || path.hasPrefix(omitted + "/") {
+            return nil
+        }
+        return (volume, components(of: path, in: volume))
+    }
+
+    /// The indexed volume with the longest mount path containing `path`.
+    private func volume(containing path: String) -> IndexedVolume? {
         var best: IndexedVolume?
         for volume in volumes.values {
             let mount = volume.info.mountPath
             let inside = mount == "/" || path == mount || path.hasPrefix(mount + "/")
             if inside && mount.count > (best?.info.mountPath.count ?? -1) { best = volume }
         }
-        guard let volume = best else { return nil }
-        for excluded in volume.configuration.excludedPaths where path.hasPrefix(excluded + "/") {
-            return nil
-        }
+        return best
+    }
+
+    private func components(of path: String, in volume: IndexedVolume) -> [String] {
         let relative = volume.info.mountPath == "/" ? path.dropFirst() : path.dropFirst(volume.info.mountPath.count)
-        return (volume, relative.split(separator: "/").map(String.init))
+        return relative.split(separator: "/").map(String.init)
+    }
+
+    /// The cached entry at `path`, found by walking down from its volume's root, or nil if it
+    /// isn't indexed. Unlike `locate(_:)`, this ignores exclusions.
+    private func entryID(at path: String) throws -> EntryID? {
+        guard let database, let volume = volume(containing: path) else { return nil }
+        var id = volume.record.rootEntry
+        for component in components(of: path, in: volume) {
+            guard let child = try database.child(of: id, named: component) else { return nil }
+            id = child.id
+        }
+        return id
     }
 
     /// Re-reads one path and makes the index match it: update, insert (scanning a new folder's
@@ -548,15 +699,10 @@ public actor IndexCoordinator {
     }
 
     private func rescanSubtree(at path: String) async throws {
-        guard let database, let located = locate(path) else { return }
-        let volume = located.volume
-        var id = volume.record.rootEntry
-        for component in located.components {
-            guard let child = try database.child(of: id, named: component) else {
-                try await apply(path: path)
-                return
-            }
-            id = child.id
+        guard let volume = locate(path)?.volume else { return }
+        guard let id = try entryID(at: path) else {
+            try await apply(path: path)
+            return
         }
         try deleteSubtree(id, includingRoot: false)
         _ = try await runScanner(

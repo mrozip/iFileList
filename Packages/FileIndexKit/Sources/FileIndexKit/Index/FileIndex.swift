@@ -108,17 +108,6 @@ public final class FileIndex: @unchecked Sendable {
             return UnsafeBufferPointer(start: start, count: keyLength)
         }
 
-        @inline(__always)
-        func matches(_ id: EntryID, _ terms: UnsafeBufferPointer<UnsafeBufferPointer<UInt8>>) -> Bool {
-            let key = searchKey(id)
-            var i = 0
-            while i < terms.count {
-                if !NameFolding.contains(key, terms[i]) { return false }
-                i += 1
-            }
-            return true
-        }
-
         public func name(_ id: EntryID) -> String {
             String(decoding: nameBytes(id), as: UTF8.self)
         }

@@ -20,7 +20,7 @@ struct ContentView: View {
             Divider()
             StatusBar(model: model)
         }
-        .searchable(text: $model.query, placement: .toolbar, prompt: "Search file names")
+        .searchable(text: $model.query, placement: .toolbar, prompt: "Search")
         .searchFocused($searchFocused)
         .onChange(of: model.searchFocusRequest) { searchFocused = true }
         .onAppear { model.windowAppeared() }

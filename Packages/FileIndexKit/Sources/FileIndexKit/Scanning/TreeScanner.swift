@@ -23,6 +23,8 @@ final class TreeScanner: @unchecked Sendable {
     struct Configuration: Sendable {
         /// Directories whose contents are skipped. The directories themselves are still listed.
         var excludedPaths: Set<String> = []
+        /// Files and folders left out entirely, with everything inside them.
+        var omittedPaths: Set<String> = []
         /// When set, directories on other devices (mount points) are listed but not entered.
         var devices: Set<Int32>?
         var batchSize = 8_192
@@ -33,6 +35,8 @@ final class TreeScanner: @unchecked Sendable {
     private let ids: IDAllocator
     private let handler: @Sendable (EntryBatch) -> Void
     private let isCancelled: @Sendable () -> Bool
+    /// Names of omitted items, keyed by the path of the folder that contains them.
+    private let omittedNames: [String: Set<String>]
 
     private let condition = NSCondition()
     private var pending: [(path: String, id: EntryID)] = []
@@ -48,6 +52,8 @@ final class TreeScanner: @unchecked Sendable {
         self.ids = ids
         self.isCancelled = isCancelled
         self.handler = handler
+        omittedNames = Dictionary(grouping: configuration.omittedPaths) { ($0 as NSString).deletingLastPathComponent }
+            .mapValues { Set($0.map { ($0 as NSString).lastPathComponent }) }
     }
 
     /// Scans everything below `rootPath`, whose own entry (`rootID`) the caller has recorded.
@@ -93,7 +99,9 @@ final class TreeScanner: @unchecked Sendable {
         _ directory: (path: String, id: EntryID), with reader: DirectoryReader,
         into batch: inout EntryBatch, stats: inout ScanStatistics, children: inout [(path: String, id: EntryID)]
     ) {
+        let omitted = omittedNames.isEmpty ? nil : omittedNames[directory.path]
         let error = reader.forEachItem(inDirectory: directory.path) { item in
+            if let omitted, omitted.contains(String(decoding: item.name, as: UTF8.self)) { return }
             let id = ids.allocate()
             batch.append(
                 id: id, parent: directory.id, flags: item.flags, size: item.isDirectory ? 0 : item.size,

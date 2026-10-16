@@ -86,6 +86,20 @@ import Testing
         #expect(Self.paths(in: index) == [tmp.path, tmp.path + "/skip", tmp.path + "/keep"])
     }
 
+    @Test func omittedItemsAreLeftOutWithTheirContents() throws {
+        let tmp = try TemporaryDirectory()
+        try tmp.makeDirectory("a/skip/deep")
+        try tmp.makeFile("a/skip/deep/file")
+        try tmp.makeFile("a/secret.txt")
+        try tmp.makeFile("a/keep.txt")
+
+        let (index, statistics) = Self.scan(tmp.path) {
+            $0.omittedPaths = [tmp.path + "/a/skip", tmp.path + "/a/secret.txt"]
+        }
+        #expect(Self.paths(in: index) == [tmp.path, tmp.path + "/a", tmp.path + "/a/keep.txt"])
+        #expect(statistics.entries == 2)
+    }
+
     @Test func otherDevicesAreNotEntered() throws {
         let tmp = try TemporaryDirectory()
         try tmp.makeDirectory("dir")
@@ -120,15 +134,42 @@ import Testing
 }
 
 @Suite struct VolumeCatalogTests {
-    @Test func onlyLocalBrowsableVolumesAreIndexed() {
-        #expect(VolumeCatalog.isIndexable(isLocal: true, isBrowsable: true, mountPath: "/Volumes/Claude"))
-        // SMB share
-        #expect(!VolumeCatalog.isIndexable(isLocal: false, isBrowsable: true, mountPath: "/Volumes/home"))
+    @Test func onlyBrowsableVolumesAreIndexable() {
+        #expect(VolumeCatalog.isIndexable(isBrowsable: true, mountPath: "/Volumes/Claude"))
+        // SMB share: whether it is indexed is up to IndexSettings
+        #expect(VolumeCatalog.isIndexable(isBrowsable: true, mountPath: "/Volumes/home"))
         // Time Machine destination, Recovery, system volumes
-        #expect(!VolumeCatalog.isIndexable(isLocal: true, isBrowsable: false, mountPath: "/Volumes/Backups of Mac"))
-        #expect(!VolumeCatalog.isIndexable(
-            isLocal: true, isBrowsable: true, mountPath: "/Volumes/.timemachine/X/2026-10-15.backup"))
-        #expect(!VolumeCatalog.isIndexable(isLocal: true, isBrowsable: true, mountPath: "/System/Volumes/Data"))
+        #expect(!VolumeCatalog.isIndexable(isBrowsable: false, mountPath: "/Volumes/Backups of Mac"))
+        #expect(!VolumeCatalog.isIndexable(isBrowsable: true, mountPath: "/Volumes/.timemachine/X/2026-10-15.backup"))
+        #expect(!VolumeCatalog.isIndexable(isBrowsable: true, mountPath: "/System/Volumes/Data"))
+    }
+
+    @Test func settingsDecideWhichVolumesAreIndexed() {
+        let boot = VolumeInfo(key: "boot", mountPath: "/", name: "Mac", device: 1, isBoot: true)
+        let disk = VolumeInfo(key: "disk", mountPath: "/Volumes/Disk", name: "Disk", device: 2, isBoot: false)
+        let share = VolumeInfo(
+            key: "share", mountPath: "/Volumes/share", name: "share", device: 3, isBoot: false, isNetwork: true)
+        var settings = IndexSettings()
+        #expect(settings.includes(boot) && !settings.includes(disk) && !settings.includes(share))
+        settings.indexesExternalVolumes = true
+        #expect(settings.includes(disk) && !settings.includes(share))
+        settings.indexesNetworkVolumes = true
+        settings.excludedPaths = ["/Volumes/Disk"]
+        #expect(!settings.includes(disk) && settings.includes(share))
+        settings.excludedPaths = ["/Volumes/Dis"]
+        #expect(settings.includes(disk))
+        settings.excludedPaths = ["/Volumes"]
+        #expect(!settings.includes(disk) && !settings.includes(share) && settings.includes(boot))
+    }
+
+    @Test func canonicalPathsMatchHowTheIndexListsItems() throws {
+        let tmp = try TemporaryDirectory()
+        try tmp.makeDirectory("Real")
+        try FileManager.default.createSymbolicLink(atPath: tmp.path + "/link", withDestinationPath: tmp.path + "/Real")
+        #expect(VolumeCatalog.canonicalPath(tmp.path + "/link/") == tmp.path + "/Real")
+        #expect(VolumeCatalog.canonicalPath(tmp.path + "/real") == tmp.path + "/Real")
+        #expect(VolumeCatalog.canonicalPath("/System/Volumes/Data/Users") == "/Users")
+        #expect(VolumeCatalog.canonicalPath("/no/such/folder/") == "/no/such/folder")
     }
 
     @Test func mountedVolumesIncludeTheStartupDisk() {

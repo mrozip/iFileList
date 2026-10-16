@@ -15,19 +15,6 @@ import Testing
         let accented = Array("Café Crème.pdf".utf8)
         accented.withUnsafeBufferPointer { #expect(NameFolding.foldedKey($0) == Array("cafe creme.pdf".utf8)) }
     }
-
-    @Test func containsIgnoresASCIICase() {
-        func contains(_ haystack: String, _ needle: String) -> Bool {
-            Array(haystack.utf8).withUnsafeBufferPointer { h in
-                Array(needle.utf8).withUnsafeBufferPointer { NameFolding.contains(h, $0) }
-            }
-        }
-        #expect(contains("PLAN.md", "plan"))
-        #expect(contains("PLAN.md", ".md"))
-        #expect(!contains("PLAN.md", "planx"))
-        #expect(contains("abc", ""))
-        #expect(!contains("ab", "abc"))
-    }
 }
 
 @Suite struct FileIndexTests {
@@ -104,6 +91,63 @@ import Testing
     @Test func cancelledSearchReturnsNil() {
         let engine = SearchEngine(index: FileIndexTests.makeIndex())
         #expect(engine.search("", order: .byName, isCancelled: { true }) == nil)
+        #expect(engine.search("users", order: .byName, isCancelled: { true }) == nil)
+    }
+
+    @Test func termsMatchNamesAndFoldersAnywhereInThePath() {
+        let engine = SearchEngine(index: FileIndexTests.makeIndex())
+        func search(_ query: String) -> [EntryID]? { engine.search(query, order: .byName)?.sorted() }
+        // A folder's name matches the folder and everything inside it.
+        #expect(search("users") == [2, 3, 4, 5, 6])
+        #expect(search("users me") == [3, 4, 5, 6])
+        #expect(search("users/ pdf") == [5])
+        #expect(search("me/pl") == [4])
+        #expect(search("/USERS/") == [3, 4, 5, 6])
+        #expect(search("resume") == [5])
+        #expect(search("/") == [1, 2, 3, 4, 5, 6])
+        #expect(search("//") == [])
+        #expect(search("plan.md/") == [])
+        #expect(search("") == [1, 2, 3, 4, 5, 6])
+    }
+
+    @Test func pathsStartAtTheVolumeMountPathAndUseFoldedNames() {
+        let index = FileIndex()
+        index.insert(.make([
+            (1, 0, "/Volumes/Disk", [.directory, .volumeRoot], 0),
+            (2, 1, "Café", .directory, 0),
+            (3, 2, "Menu.txt", [], 10),
+        ]), volume: 2)
+        let engine = SearchEngine(index: index)
+        #expect(engine.search("disk/cafe/menu", order: .byName)?.sorted() == [3])
+        #expect(engine.search("volumes/disk", order: .byName)?.sorted() == [1, 2, 3])
+        #expect(engine.search("café/", order: .byName) == [3])
+    }
+
+    /// Compares search with a substring search over paths built by `FileIndex.path(of:)`, on a
+    /// random tree whose names and terms share a tiny alphabet so partial matches abound.
+    @Test func searchAgreesWithSearchingBuiltPaths() {
+        var random = SplitMix64(seed: 42)
+        var batch = EntryBatch()
+        batch.append(id: 1, parent: 0, flags: [.directory, .volumeRoot], size: 0, mtime: 0, crtime: 0, name: "/")
+        var directories: [EntryID] = [1]
+        for id in EntryID(2)...400 {
+            let name = String((0..<Int.random(in: 1...4, using: &random)).map { _ in "aAb".randomElement(using: &random)! })
+            let isDirectory = Bool.random(using: &random)
+            batch.append(
+                id: id, parent: directories.randomElement(using: &random)!, flags: isDirectory ? .directory : [],
+                size: 0, mtime: 0, crtime: 0, name: name)
+            if isDirectory { directories.append(id) }
+        }
+        let index = FileIndex()
+        index.insert(batch, volume: 1)
+        let engine = SearchEngine(index: index)
+        let paths = index.read { reader in (1...400).map { reader.path(of: EntryID($0))!.lowercased() } }
+
+        for _ in 0..<300 {
+            let term = String((0..<Int.random(in: 1...6, using: &random)).map { _ in "ab/".randomElement(using: &random)! })
+            let expected = (1...400).filter { paths[$0 - 1].contains(term) }.map(EntryID.init)
+            #expect(engine.search(term, order: .byName)?.sorted() == expected, "term \(term)")
+        }
     }
 
     @Test func resultsFollowTheSortOrderOnceBuilt() async {

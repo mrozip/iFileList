@@ -36,27 +36,6 @@ public enum NameFolding {
         }
     }
 
-    /// Whether `haystack`, ASCII-lowercased, contains `needle` (already lowercased).
-    @inline(__always)
-    static func contains(_ haystack: UnsafeBufferPointer<UInt8>, _ needle: UnsafeBufferPointer<UInt8>) -> Bool {
-        let n = needle.count
-        guard n > 0 else { return true }
-        let h = haystack.count
-        guard h >= n, let hay = haystack.baseAddress, let ndl = needle.baseAddress else { return false }
-        let first = ndl[0]
-        var i = 0
-        let last = h - n
-        while i <= last {
-            if lowercaseASCII(hay[i]) == first {
-                var j = 1
-                while j < n && lowercaseASCII(hay[i + j]) == ndl[j] { j += 1 }
-                if j == n { return true }
-            }
-            i += 1
-        }
-        return false
-    }
-
     /// Orders two search keys by their ASCII-lowercased bytes.
     static func compare(_ a: UnsafeBufferPointer<UInt8>, _ b: UnsafeBufferPointer<UInt8>) -> Int {
         let count = min(a.count, b.count)

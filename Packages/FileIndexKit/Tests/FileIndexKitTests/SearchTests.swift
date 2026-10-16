@@ -198,4 +198,76 @@ import Testing
         #expect(results?.last == 7)
         #expect(results?.count == 7)
     }
+
+    // MARK: Folder filter
+
+    /// / (1) → Users (2) → me (3) → Doc (4) → a.txt (5), Sub (6) → b.txt (7); me → Docs (8) → c.txt (9);
+    /// /Volumes/Disk (10) → d.txt (11)
+    static func makeFolderIndex() -> FileIndex {
+        let index = FileIndex()
+        index.insert(.make([
+            (1, 0, "/", [.directory, .volumeRoot], 0),
+            (2, 1, "Users", .directory, 0),
+            (3, 2, "me", .directory, 0),
+            (4, 3, "Doc", .directory, 0),
+            (5, 4, "a.txt", [], 3),
+            (6, 4, "Sub", .directory, 0),
+            (7, 6, "b.txt", [], 2),
+            (8, 3, "Docs", .directory, 0),
+            (9, 8, "c.txt", [], 1),
+        ]), volume: 1)
+        index.insert(.make([
+            (10, 0, "/Volumes/Disk", [.directory, .volumeRoot], 0),
+            (11, 10, "d.txt", [], 0),
+        ]), volume: 2)
+        return index
+    }
+
+    @Test func folderFilterKeepsEverythingInsideTheFolderButNotTheFolder() {
+        let engine = SearchEngine(index: Self.makeFolderIndex())
+        func search(_ query: String = "", in folder: String) -> [EntryID]? {
+            engine.search(query, filters: SearchFilters(folder: folder), order: .byName)?.sorted()
+        }
+        #expect(search(in: "/Users/me/Doc") == [5, 6, 7])
+        #expect(search(in: "/Users/me/Doc/Sub") == [7])
+        #expect(search(in: "/Users/me/Docs") == [9])
+        #expect(search(in: "/Users/me") == [4, 5, 6, 7, 8, 9])
+        #expect(search("txt", in: "/Users/me/Doc") == [5, 7])
+        #expect(search("sub", in: "/Users/me") == [6, 7])
+        #expect(search(in: "/Volumes/Disk") == [11])
+        #expect(search(in: "/Volumes") == [10, 11])
+        #expect(search(in: "/") == [2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+    }
+
+    @Test func folderFilterMatchesThePathExactly() {
+        let engine = SearchEngine(index: Self.makeFolderIndex())
+        func search(in folder: String) -> [EntryID]? {
+            engine.search("", filters: SearchFilters(folder: folder), order: .byName)
+        }
+        #expect(search(in: "/Users/me/Do") == [])
+        #expect(search(in: "/users/me/doc") == [])
+        #expect(search(in: "/Users/me/Doc/a.txt") == [])
+        #expect(search(in: "/Nowhere") == [])
+        #expect(search(in: "/Volumes/Dis") == [])
+    }
+
+    @Test func cancelledFolderFilterReturnsNil() {
+        let engine = SearchEngine(index: Self.makeFolderIndex())
+        #expect(engine.search("", filters: SearchFilters(folder: "/Users"), order: .byName, isCancelled: { true }) == nil)
+    }
+
+    @Test func folderFilterKeepsTheSortOrderAndFiltersNewEntries() async {
+        let index = Self.makeFolderIndex()
+        let built = AsyncStream<SortKey>.makeStream()
+        let engine = SearchEngine(index: index) { built.continuation.yield($0) }
+        var iterator = built.stream.makeAsyncIterator()
+        let order = SortOrder(key: .size, ascending: false)
+        let filters = SearchFilters(folder: "/Users/me/Doc")
+        _ = engine.search("", filters: filters, order: order)
+        #expect(await iterator.next() == .size)
+        #expect(engine.search("txt", filters: filters, order: order) == [5, 7])
+
+        index.insert(.make([(12, 6, "e.txt", [], 99), (13, 8, "f.txt", [], 99)]), volume: 1)
+        #expect(engine.search("txt", filters: filters, order: order) == [5, 7, 12])
+    }
 }

@@ -154,6 +154,28 @@ import Testing
         await coordinator.stop()
     }
 
+    @Test func entryIDsResolvePathsAfterRefresh() async throws {
+        try root.makeDirectory("docs")
+        try root.makeFile("notes.txt")
+        var settings = Self.indexingExternalVolumes
+        settings.excludedPaths = [root.path + "/notes.txt"]
+        let coordinator = makeCoordinator(settings: settings)
+        await coordinator.start()
+        await coordinator.waitForPendingWork()
+
+        // Created and refreshed right away, without waiting for FSEvents.
+        try root.makeFile("docs/new.txt")
+        coordinator.refresh(paths: [root.path + "/docs/new.txt"])
+        let paths = [root.path + "/docs/new.txt", root.path + "/docs", root.path + "/missing", root.path + "/notes.txt"]
+        let ids = await coordinator.entryIDs(atPaths: paths)
+        #expect(ids.count == 4)
+        #expect(ids[0].flatMap { coordinator.index.path(of: $0) } == root.path + "/docs/new.txt")
+        #expect(ids[1].flatMap { coordinator.index.path(of: $0) } == root.path + "/docs")
+        #expect(ids[2] == nil)
+        #expect(ids[3] == nil)
+        await coordinator.stop()
+    }
+
     @Test func exclusionsChangedWhileClosedApplyOnRestart() async throws {
         try root.makeDirectory("docs")
         try root.makeFile("docs/a.txt")

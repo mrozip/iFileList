@@ -1,8 +1,10 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Bindable var model: AppModel
     @FocusState private var searchFocused: Bool
+    @State private var dropTargeted = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -15,15 +17,80 @@ struct ContentView: View {
                 FullDiskAccessOnboarding(model: model)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                if model.hasFilters {
+                    FilterBar(model: model)
+                    Divider()
+                }
                 FileTableView(model: model)
+                    .dropDestination(for: URL.self) { urls, _ in
+                        guard let folder = urls.first(where: Self.isFolder) else { return false }
+                        model.filter(toFolder: folder)
+                        return true
+                    } isTargeted: { dropTargeted = $0 }
+                    .overlay {
+                        if dropTargeted {
+                            RoundedRectangle(cornerRadius: 4).strokeBorder(.tint, lineWidth: 3).allowsHitTesting(false)
+                        }
+                    }
             }
             Divider()
             StatusBar(model: model)
         }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    model.showsFolderPicker = true
+                } label: {
+                    Label("Filter by Folder", systemImage: model.filters.folder == nil ? "folder" : "folder.fill")
+                }
+                .help("Show only the items in a folder")
+                .disabled(model.showsAccessOnboarding)
+            }
+        }
+        .fileImporter(isPresented: $model.showsFolderPicker, allowedContentTypes: [.folder]) { result in
+            if case .success(let url) = result { model.filter(toFolder: url) }
+        }
+        .fileDialogConfirmationLabel("Filter")
+        .fileDialogDefaultDirectory(model.filters.folder.map { URL(fileURLWithPath: $0, isDirectory: true) })
         .searchable(text: $model.query, placement: .toolbar, prompt: "Search")
         .searchFocused($searchFocused)
         .onChange(of: model.searchFocusRequest) { searchFocused = true }
         .onAppear { model.windowAppeared() }
+    }
+
+    private static func isFolder(_ url: URL) -> Bool {
+        url.isFileURL && (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }
+}
+
+/// The active filters, shown above the list only while there are any. Each filter is one item in
+/// the row, followed by a button that clears them all.
+private struct FilterBar: View {
+    let model: AppModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let folder = model.filters.folder {
+                Image(systemName: "folder")
+                Text((folder as NSString).abbreviatingWithTildeInPath)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(folder)
+                Button("Change…") { model.showsFolderPicker = true }
+                    .buttonStyle(.link)
+            }
+            Spacer()
+            Button {
+                model.clearFilters()
+            } label: {
+                Label("Clear Filters", systemImage: "xmark.circle.fill")
+            }
+            .buttonStyle(.borderless)
+        }
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.tint.opacity(0.08))
     }
 }
 
@@ -33,12 +100,23 @@ private struct StatusBar: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            if model.isBusy {
+            if let operation = model.operation {
                 ProgressView().controlSize(.small)
+                Text(operation.text)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if let cancel = operation.cancel {
+                    Button("Stop") { cancel.cancel() }
+                        .buttonStyle(.link)
+                }
+            } else {
+                if model.isBusy {
+                    ProgressView().controlSize(.small)
+                }
+                Text(model.statusText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            Text(model.statusText)
-                .lineLimit(1)
-                .truncationMode(.middle)
             Spacer()
             if !model.hasFullDiskAccess && !model.showsAccessOnboarding {
                 Button("Grant Full Disk Access…") { showsAccessInfo = true }

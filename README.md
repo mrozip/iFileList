@@ -46,7 +46,7 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE=nota
 
 ## Searching
 
-Currently, searching by filename or path is supported.
+Searching by filename or path is supported.
 
 ## Settings
 
@@ -58,9 +58,13 @@ Open **iFileList › Settings…** (⌘,) to choose what is indexed. The startup
 
 ## Keyboard shortcuts
 
+Most common Finder shortcuts are available.
+
 | Shortcut | Action |
 | --- | --- |
 | ⌘F | Focus the search field |
+| ⇧⌘F | Filter by folder |
+| ⌥⌘F | Clear filters |
 | Return or ⌘O | Open the selected files |
 | ⌘R | Rescan all volumes |
 | ⌘, | Open Settings |

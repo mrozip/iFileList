@@ -20,6 +20,20 @@ public struct SortOrder: Sendable, Hashable {
     public static let byName = SortOrder(key: .name, ascending: true)
 }
 
+/// Narrows a search beyond its query. Every kind of filter belongs here, so that resetting the
+/// value to `SearchFilters()` clears them all.
+public struct SearchFilters: Sendable, Hashable {
+    /// Only entries inside this folder, at any depth: a path as `VolumeCatalog.canonicalPath(_:)`
+    /// returns it.
+    public var folder: String?
+
+    public init(folder: String? = nil) {
+        self.folder = folder
+    }
+
+    public var isEmpty: Bool { folder == nil }
+}
+
 /// Filters the index by full path and returns entry IDs in the requested order.
 ///
 /// Each term becomes a `PathPattern`: one pass over the directories, then a parallel scan over the
@@ -55,18 +69,29 @@ public final class SearchEngine: @unchecked Sendable {
         set { lock.withLock { deferred = newValue } }
     }
 
-    /// Returns visible IDs whose full paths contain every term of `query`, or nil if cancelled.
-    /// A path ends with the entry's name, so a term matches names and folder names alike.
+    /// Returns visible IDs whose full paths contain every term of `query` and that pass `filters`,
+    /// or nil if cancelled. A path ends with the entry's name, so a term matches names and folder
+    /// names alike.
     public func search(
-        _ query: String, order: SortOrder, isCancelled: @escaping @Sendable () -> Bool = { false }
+        _ query: String, filters: SearchFilters = SearchFilters(), order: SortOrder,
+        isCancelled: @escaping @Sendable () -> Bool = { false }
     ) -> [EntryID]? {
         let terms = NameFolding.terms(of: query)
         guard terms.allSatisfy({ $0.count <= PathPattern.maxTermLength }) else { return [] }
+        if let folder = filters.folder, folder.utf8.count >= PathPattern.maxTermLength { return [] }
 
         let cached = lock.withLock { sorted[order.key] }
         let result: [EntryID]? = index.read { reader in
             var patterns: [PathPattern] = []
-            defer { patterns.forEach { $0.deallocate() } }
+            var scope: FolderScope?
+            defer {
+                patterns.forEach { $0.deallocate() }
+                scope?.deallocate()
+            }
+            if let folder = filters.folder {
+                guard let built = FolderScope(path: folder, reader: reader, isCancelled: isCancelled) else { return nil }
+                scope = built
+            }
             for term in terms {
                 guard let pattern = PathPattern(term, reader: reader, isCancelled: isCancelled) else { return nil }
                 patterns.append(pattern)
@@ -76,13 +101,13 @@ public final class SearchEngine: @unchecked Sendable {
                 var tailStart = 1
                 if let cached {
                     guard let matches = cached.ids.withUnsafeBufferPointer({
-                        Self.filter(reader, patterns, candidates: $0, range: 0..<$0.count, isCancelled)
+                        Self.filter(reader, scope, patterns, candidates: $0, range: 0..<$0.count, isCancelled)
                     }) else { return nil }
                     head = order.ascending ? matches : matches.reversed()
                     tailStart = cached.slotCount
                 }
                 guard let tail = Self.filter(
-                    reader, patterns, candidates: nil, range: tailStart..<max(tailStart, reader.slotCount),
+                    reader, scope, patterns, candidates: nil, range: tailStart..<max(tailStart, reader.slotCount),
                     isCancelled)
                 else { return nil }
                 head.append(contentsOf: tail)
@@ -96,7 +121,7 @@ public final class SearchEngine: @unchecked Sendable {
     /// Filters candidates in parallel chunks, preserving their order. With `candidates` nil the
     /// candidates are the IDs in `range`; otherwise `range` indexes into `candidates`.
     private static func filter(
-        _ reader: FileIndex.Reader, _ patterns: UnsafeBufferPointer<PathPattern>,
+        _ reader: FileIndex.Reader, _ scope: FolderScope?, _ patterns: UnsafeBufferPointer<PathPattern>,
         candidates: UnsafeBufferPointer<EntryID>?, range: Range<Int>,
         _ isCancelled: @escaping @Sendable () -> Bool
     ) -> [EntryID]? {
@@ -106,6 +131,7 @@ public final class SearchEngine: @unchecked Sendable {
         let chunkCount = (total + chunkSize - 1) / chunkSize
         var partials = [[EntryID]](repeating: [], count: chunkCount)
         nonisolated(unsafe) let patterns = patterns
+        nonisolated(unsafe) let scope = scope
         nonisolated(unsafe) let candidates = candidates
         partials.withUnsafeMutableBufferPointer { output in
             nonisolated(unsafe) let output = output
@@ -117,12 +143,12 @@ public final class SearchEngine: @unchecked Sendable {
                 if let candidates {
                     for k in lower..<upper {
                         let id = candidates[k]
-                        if reader.isVisible(id) && matchesAll(reader, id, patterns) { local.append(id) }
+                        if reader.isVisible(id) && matchesAll(reader, id, scope, patterns) { local.append(id) }
                     }
                 } else {
                     for k in lower..<upper {
                         let id = EntryID(k)
-                        if reader.isVisible(id) && matchesAll(reader, id, patterns) { local.append(id) }
+                        if reader.isVisible(id) && matchesAll(reader, id, scope, patterns) { local.append(id) }
                     }
                 }
                 output[chunk] = local
@@ -137,8 +163,9 @@ public final class SearchEngine: @unchecked Sendable {
 
     @inline(__always)
     private static func matchesAll(
-        _ reader: FileIndex.Reader, _ id: EntryID, _ patterns: UnsafeBufferPointer<PathPattern>
+        _ reader: FileIndex.Reader, _ id: EntryID, _ scope: FolderScope?, _ patterns: UnsafeBufferPointer<PathPattern>
     ) -> Bool {
+        if let scope, !scope.contains(reader, id) { return false }
         var i = 0
         while i < patterns.count {
             if !patterns[i].matches(reader, id) { return false }

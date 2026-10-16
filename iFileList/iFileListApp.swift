@@ -16,12 +16,28 @@ struct iFileListApp: App {
                 AboutCommand()
             }
             CommandGroup(after: .newItem) {
-                Button("Rescan All Volumes") { model.rescan() }
-                    .keyboardShortcut("r")
+                FileMenuItems(model: model)
+            }
+            // File operations have no Undo, and the search field doesn't need the menu items.
+            CommandGroup(replacing: .undoRedo) {}
+            CommandGroup(replacing: .pasteboard) {
+                PasteboardMenuItems()
+            }
+            CommandGroup(after: .pasteboard) {
+                EditMenuItems(model: model)
             }
             CommandGroup(replacing: .textEditing) {
                 Button("Find") { model.focusSearch() }
                     .keyboardShortcut("f")
+            }
+            CommandMenu("Filter") {
+                Button("Filter by Folder…") { model.showsFolderPicker = true }
+                    .keyboardShortcut("f", modifiers: [.command, .shift])
+                    .disabled(model.showsAccessOnboarding)
+                Divider()
+                Button("Clear Filters") { model.clearFilters() }
+                    .keyboardShortcut("f", modifiers: [.command, .option])
+                    .disabled(!model.hasFilters)
             }
         }
 

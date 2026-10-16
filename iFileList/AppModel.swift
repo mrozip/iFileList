@@ -13,6 +13,12 @@ final class AppModel {
     var query = "" {
         didSet { if query != oldValue { runSearch() } }
     }
+    /// Narrows the list beyond the query. Not saved: each launch starts unfiltered, like the query.
+    var filters = SearchFilters() {
+        didSet { if filters != oldValue { runSearch() } }
+    }
+    /// Shows the folder picker for the folder filter.
+    var showsFolderPicker = false
     var sortOrder = AppModel.savedSortOrder {
         didSet {
             guard sortOrder != oldValue else { return }
@@ -43,13 +49,22 @@ final class AppModel {
     private(set) var showsAccessOnboarding = false
     /// Increments to ask the window to focus the search field.
     private(set) var searchFocusRequest = 0
+    /// The list's selection and focus; the menu bar's file commands act on it.
+    var selection = FileSelection()
+    /// The file operation running in the background, shown in the status bar.
+    var operation: FileOperationProgress?
 
     @ObservationIgnored let index: FileIndex
-    @ObservationIgnored private let coordinator: IndexCoordinator?
+    @ObservationIgnored let coordinator: IndexCoordinator?
+    @ObservationIgnored weak var listController: FileListController?
+    /// Entries to select once the results include them, after an operation created them.
+    @ObservationIgnored var pendingSelection: PendingSelection?
+    @ObservationIgnored var applicationsByType: [String: [FileActions.Application]] = [:]
     @ObservationIgnored private let engine: SearchEngine
     @ObservationIgnored private let databaseURL: URL?
     @ObservationIgnored private let searchGeneration = SearchGeneration()
-    @ObservationIgnored private var searchedVersion: UInt64 = 0
+    /// The index version the current results were searched at.
+    @ObservationIgnored private(set) var searchedVersion: UInt64 = 0
     @ObservationIgnored private var throttledSearch: Task<Void, Never>?
     @ObservationIgnored private var searchInFlight = false
     @ObservationIgnored private var refreshPending = false
@@ -143,6 +158,27 @@ final class AppModel {
         searchFocusRequest += 1
     }
 
+    // MARK: Filters
+
+    var hasFilters: Bool { !filters.isEmpty }
+
+    /// Limits the list to the items inside `url`, under the path the index lists it by.
+    func filter(toFolder url: URL) {
+        guard url.isFileURL else { return }
+        filters.folder = VolumeCatalog.canonicalPath(url.path(percentEncoded: false))
+    }
+
+    /// Limits the list to a folder entry's contents, or for a file, to its enclosing folder's.
+    func filterToFolder(of id: EntryID) {
+        guard let entry = index.snapshot(id) else { return }
+        let folder = entry.isDirectory ? index.path(of: id) : folderPath(of: entry)
+        if let folder, !folder.isEmpty { filters.folder = folder }
+    }
+
+    func clearFilters() {
+        filters = SearchFilters()
+    }
+
     // MARK: Settings
 
     /// Adds files and folders to the excluded list, under the paths the index lists them by.
@@ -174,7 +210,10 @@ final class AppModel {
         observers.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.recheckFullDiskAccess() }
+            MainActor.assumeIsolated {
+                self?.recheckFullDiskAccess()
+                self?.applicationsByType.removeAll()  // apps may have been installed meanwhile
+            }
         })
     }
 
@@ -222,14 +261,15 @@ final class AppModel {
     }
 
     /// Starts a search for the current query and order, cancelling any search in progress.
-    private func runSearch() {
+    func runSearch() {
         lastSearchStart = Date()
         searchInFlight = true
         let generation = searchGeneration.next()
         let token = searchGeneration
-        let (engine, query, order, version) = (engine, query, sortOrder, index.version)
+        let (engine, query, filters, order, version) = (engine, query, filters, sortOrder, index.version)
         Task.detached(priority: .userInitiated) { [weak self] in
-            let ids = engine.search(query, order: order, isCancelled: { token.current != generation })
+            let ids = engine.search(
+                query, filters: filters, order: order, isCancelled: { token.current != generation })
             await self?.finishSearch(ids, generation: generation, version: version)
         }
     }
@@ -267,7 +307,7 @@ final class AppModel {
         case .scanning(let volume, let entries):
             text = "Indexing “\(volume)”… \(entries.formatted()) items found"
         case .idle:
-            text = query.isEmpty
+            text = query.isEmpty && !hasFilters
                 ? "\(status.visibleEntries.formatted()) items"
                 : "\(results.count.formatted()) of \(status.visibleEntries.formatted()) items"
         case .failed(let message):
@@ -340,6 +380,15 @@ final class AppModel {
     }
 
     func showInfo(_ ids: [EntryID]) {
+        guard !ids.isEmpty else { return }
+        if ids.count > 10 {
+            let alert = NSAlert()
+            alert.messageText = "Show info for \(ids.count.formatted()) items?"
+            alert.informativeText = "A separate Info window opens for each item."
+            alert.addButton(withTitle: "Show Info")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
         FileActions.showInfo(ids.compactMap(url(for:)))
     }
 }

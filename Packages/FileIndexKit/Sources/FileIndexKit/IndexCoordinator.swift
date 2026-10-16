@@ -123,6 +123,19 @@ public actor IndexCoordinator {
         jobContinuation.yield(.events(paths.map { FSEvent(path: $0, flags: [], id: 0) }))
     }
 
+    /// The listed entry at each path, or nil where nothing visible is indexed, after the work queued
+    /// so far (such as a `refresh(paths:)` for the same paths) has finished. Lets the app select an
+    /// item it just created, renamed or moved.
+    public func entryIDs(atPaths paths: [String]) async -> [EntryID?] {
+        await waitForPendingWork()
+        return paths.map { raw in
+            guard let path = normalize(raw), locate(path) != nil,
+                  let id = try? entryID(at: path), index.read({ $0.isVisible(id) })
+            else { return nil }
+            return id
+        }
+    }
+
     /// Changes which volumes and paths are indexed. Applied after the work already queued, such as
     /// a scan in progress; changes made meanwhile are applied together.
     public nonisolated func update(settings: IndexSettings) {

@@ -20,9 +20,6 @@ struct iFileListApp: App {
             }
             // File operations have no Undo, and the search field doesn't need the menu items.
             CommandGroup(replacing: .undoRedo) {}
-            CommandGroup(replacing: .pasteboard) {
-                PasteboardMenuItems()
-            }
             CommandGroup(after: .pasteboard) {
                 EditMenuItems(model: model)
             }

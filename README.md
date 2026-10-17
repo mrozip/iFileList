@@ -52,22 +52,6 @@ Searching by filename or path is supported.
 
 Closing the window leaves iFileList running in the menu bar, so the index stays up to date. Press ⌃⌥Space or choose **Search iFileList** from the menu bar icon to restore or hide the window.
 
-## Settings
-
-Open **iFileList › Settings…** (⌘,).
-
-**General**
-
-- **Keep running in the menu bar**: Turn off to quit when the window closes.
-- **Launch at login**: Start in the menu bar when you log in.
-- **Search shortcut**: Click it and press a new shortcut. Escape cancels; Delete removes it.
-
-**Index** (the startup disk is always indexed)
-
-- **Index external drives**: USB, Thunderbolt, mounted disk images.
-- **Index network drives**: Mounted network shares. Requires a full rescan (⌘R) or restart.
-- **Excluded from Index**: Files and folders to exclude from indexing.
-
 ## Keyboard shortcuts
 
 Most common Finder shortcuts are available.

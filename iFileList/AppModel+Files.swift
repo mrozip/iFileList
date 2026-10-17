@@ -25,9 +25,9 @@ struct FinderTag: Identifiable {
 // MARK: - Commands
 
 extension AppModel {
-    /// The selection, for the menu bar's commands; empty while the list isn't focused.
+    /// The selection, for the menu bar's commands. They reach the list only while it has focus.
     var selectionTargets: FileTargets {
-        selection.isActive ? FileTargets(selection: selection, index: index) : .none
+        FileTargets(selection: selection, index: index)
     }
 
     func targets(_ ids: [EntryID]) -> FileTargets {
@@ -61,7 +61,7 @@ extension AppModel {
         }
     }
 
-    /// New Folder, Paste and Move Item Here put items in the filtered folder; without a folder
+    /// New Folder and Paste put items in the filtered folder; without a folder
     /// filter there is no current folder, as in Finder's search results.
     var hasTargetFolder: Bool { filters.folder != nil && !showsAccessOnboarding }
 
@@ -138,10 +138,11 @@ extension AppModel {
 
     /// Moves items to the Trash through Finder, so its Put Back works.
     func moveToTrash(_ urls: [URL]) {
-        guard !urls.isEmpty, confirmMany(urls.count, action: "Move to Trash") else { return }
+        guard !urls.isEmpty, confirmMany(urls.count, action: String(localized: "Move to Trash")) else { return }
         let showsProgress = urls.count > 20 && operation == nil
         if showsProgress {
-            operation = FileOperationProgress(text: "Moving \(urls.count.formatted()) items to the Trash…", cancel: nil)
+            let text = String(localized: "Moving \(urls.count.formatted()) items to the Trash…")
+            operation = FileOperationProgress(text: text, cancel: nil)
         }
         NSWorkspace.shared.recycle(urls) { [weak self] map, error in
             Task { @MainActor in
@@ -399,8 +400,8 @@ extension AppModel {
 
     // MARK: Paste
 
-    /// Copies, or with `moving` moves, the files on the pasteboard into the filtered folder.
-    func paste(moving: Bool) {
+    /// Copies the files on the pasteboard into the filtered folder.
+    func paste() {
         guard let folder = filters.folder, canStartOperation else { return }
         let sources = FileActions.pastedFiles()
         guard !sources.isEmpty else {
@@ -411,15 +412,13 @@ extension AppModel {
         var transfers: [FileOperations.Transfer] = []
         for source in sources {
             if source.deletingLastPathComponent().standardizedFileURL.path == destination.standardizedFileURL.path {
-                // Pasting where the item already is makes a copy, as in Finder; moving there does nothing.
-                if !moving {
-                    transfers.append(.init(source: source, destination: FileOperations.availableCopy(of: source, in: destination)))
-                }
+                // Pasting where the item already is makes a copy, as in Finder.
+                transfers.append(.init(source: source, destination: FileOperations.availableCopy(of: source, in: destination)))
                 continue
             }
             var transfer = FileOperations.Transfer(source: source, destination: destination.appendingPathComponent(source.lastPathComponent))
             if FileOperations.exists(transfer.destination) {
-                switch askAboutConflict(source.lastPathComponent, moving: moving) {
+                switch askAboutConflict(source.lastPathComponent) {
                 case .alertFirstButtonReturn: transfer.destination = FileOperations.available(transfer.destination)
                 case .alertThirdButtonReturn: transfer.replacing = true
                 default: return
@@ -430,24 +429,22 @@ extension AppModel {
         guard !transfers.isEmpty else { return }
         let planned = transfers
         Task {
-            let verb = moving ? "Moving" : "Copying"
             let total = planned.count
-            let outcome = await runInBackground("\(verb) \(total.formatted()) items…") { cancel, update in
-                FileOperations.transfer(planned, moving: moving, cancel: cancel) { number, transfer in
-                    update("\(verb) “\(transfer.source.lastPathComponent)” (\((number + 1).formatted()) of \(total.formatted()))…")
+            let outcome = await runInBackground("Copying \(total.formatted()) items…") { cancel, update in
+                FileOperations.copy(planned, cancel: cancel) { number, transfer in
+                    update("Copying “\(transfer.source.lastPathComponent)” (\((number + 1).formatted()) of \(total.formatted()))…")
                 }
             }
-            if moving { refreshIndex(outcome.done.map(\.source)) }
             select(outcome.done.map(\.destination))
             if let error = outcome.error { present(error) }
         }
     }
 
     /// Finder's question when an item is in the way: Keep Both, Stop or Replace, in that order.
-    private func askAboutConflict(_ name: String, moving: Bool) -> NSApplication.ModalResponse {
+    private func askAboutConflict(_ name: String) -> NSApplication.ModalResponse {
         let alert = NSAlert()
         alert.messageText = "An item named “\(name)” already exists in this location."
-        alert.informativeText = "Do you want to replace it with the one you’re \(moving ? "moving" : "copying")?"
+        alert.informativeText = "Do you want to replace it with the one you’re copying?"
         alert.addButton(withTitle: "Keep Both")
         alert.addButton(withTitle: "Stop")
         alert.addButton(withTitle: "Replace")

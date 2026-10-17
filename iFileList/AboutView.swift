@@ -1,8 +1,8 @@
+import AppKit
 import SwiftUI
 
 /// The About window: app name, version, project link and copyright, nothing else.
 struct AboutView: View {
-    static let windowID = "about"
     static let projectURL = URL(string: "https://github.com/mrozip/iFileList")!
 
     private var appName: String {
@@ -39,28 +39,30 @@ struct AboutView: View {
         .padding(.horizontal, 48)
         .padding(.top, 16)
         .padding(.bottom, 24)
-        .background(ZoomButtonDisabler())
     }
 }
 
-/// Disables the window's zoom button, which SwiftUI leaves on even for fixed-size windows.
-private struct ZoomButtonDisabler: NSViewRepresentable {
-    final class View: NSView {
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            window?.standardWindowButton(.zoomButton)?.isEnabled = false
-        }
+/// Hosts `AboutView` in a fixed-size window without a title bar, left out of the Window menu.
+@MainActor
+final class AboutWindowController: NSWindowController {
+    init() {
+        let content = NSHostingController(rootView: AboutView())
+        content.sizingOptions = .preferredContentSize
+        let window = NSWindow(contentViewController: content)
+        window.styleMask = [.titled, .closable, .fullSizeContentView]
+        window.title = "About iFileList"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.isExcludedFromWindowsMenu = true
+        window.collectionBehavior.insert(.fullScreenNone)
+        window.isReleasedWhenClosed = false
+        window.center()
+        super.init(window: window)
     }
 
-    func makeNSView(context: Context) -> View { View() }
-    func updateNSView(_ view: View, context: Context) {}
-}
-
-/// The "About iFileList" menu item, opening `AboutView` instead of the standard panel.
-struct AboutCommand: View {
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        Button("About iFileList") { openWindow(id: AboutView.windowID) }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
     }
 }

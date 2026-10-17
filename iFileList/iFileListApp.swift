@@ -1,71 +1,25 @@
-import SwiftUI
+import AppKit
 
+/// Starts the app with an AppKit lifecycle, so the menu bar is AppKit's (`MainMenu`) rather than
+/// SwiftUI's. The windows still show SwiftUI views.
 @main
-struct iFileListApp: App {
-    @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
-
-    private var model: AppModel { appDelegate.model }
-
-    var body: some Scene {
-        Window("iFileList", id: WindowPresenter.mainWindowID) {
-            ContentView(model: model)
-                .frame(minWidth: 600, minHeight: 300)
-        }
-        .defaultSize(width: 1100, height: 700)
-        .commands {
-            CommandGroup(replacing: .appInfo) {
-                AboutCommand()
-            }
-            CommandGroup(replacing: .appSettings) {
-                Button("Settings…") { model.presenter.showSettings() }
-                    .keyboardShortcut(",")
-            }
-            CommandGroup(after: .newItem) {
-                FileMenuItems(model: model)
-            }
-            // File operations have no Undo, and the search field doesn't need the menu items.
-            CommandGroup(replacing: .undoRedo) {}
-            CommandGroup(after: .pasteboard) {
-                EditMenuItems(model: model)
-            }
-            CommandGroup(replacing: .textEditing) {
-                Button("Find") { model.focusSearch() }
-                    .keyboardShortcut("f")
-            }
-            CommandMenu("Filter") {
-                Button("Filter by Folder…") { model.showsFolderPicker = true }
-                    .keyboardShortcut("f", modifiers: [.command, .shift])
-                    .disabled(model.showsAccessOnboarding)
-                Divider()
-                Button("Clear Filters") { model.clearFilters() }
-                    .keyboardShortcut("f", modifiers: [.command, .option])
-                    .disabled(!model.hasFilters)
-            }
-        }
-
-        Window("About iFileList", id: AboutView.windowID) {
-            AboutView()
-                .windowMinimizeBehavior(.disabled)
-                .windowFullScreenBehavior(.disabled)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-        .defaultPosition(.center)
-        .defaultLaunchBehavior(.suppressed)
-        .restorationBehavior(.disabled)
-
-        MenuBarExtra(isInserted: Bindable(model).keepsRunningInMenuBar) {
-            MenuBarMenu(model: model)
-        } label: {
-            MenuBarLabel(model: model)
-        }
+@MainActor
+enum iFileListApp {
+    static func main() {
+        let delegate = AppDelegate()
+        NSApplication.shared.delegate = delegate
+        _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
     }
 }
 
-/// Owns the model, so it exists before any scene and while no window is open.
+/// Owns the model, so it exists before any window and while none is open, and handles the menu
+/// bar's commands that need no window.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static let helpURL = URL(string: "https://github.com/mrozip/iFileList#readme")!
+
     let model = AppModel()
+    private lazy var mainMenu = MainMenu(model: model)
     private var launchedAtLogin = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -73,18 +27,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let event = NSAppleEventManager.shared().currentAppleEvent
         launchedAtLogin = event?.eventID == kAEOpenApplication
             && event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+        // One window, so no tabs and no tab commands in the View menu.
+        NSWindow.allowsAutomaticWindowTabbing = false
+        NSApp.mainMenu = mainMenu.makeMenuBar()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         model.launch()
-        if model.showsAccessOnboarding {
-            model.presenter.showMainWindow()
-        } else if launchedAtLogin && model.keepsRunningInMenuBar {
+        model.presenter.updateStatusItem()
+        if launchedAtLogin && model.keepsRunningInMenuBar && !model.showsAccessOnboarding {
             // Started to keep the index current; the window opens with the shortcut or the icon.
-            DispatchQueue.main.async { [model] in
-                model.presenter.closeMainWindow()
-                model.presenter.updateActivationPolicy()
-            }
+            model.presenter.updateActivationPolicy()
+        } else {
+            model.presenter.showMainWindow()
         }
     }
 
@@ -95,5 +50,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         model.presenter.showMainWindow()
         return false
+    }
+
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+        true
+    }
+
+    // MARK: Menu bar
+
+    @objc func showAbout(_ sender: Any?) {
+        model.presenter.showAbout()
+    }
+
+    @objc func showSettings(_ sender: Any?) {
+        model.presenter.showSettings()
+    }
+
+    @objc func rescanAllVolumes(_ sender: Any?) {
+        model.rescan()
+    }
+
+    /// The README, since the app has no help book for NSApplication's Help.
+    @objc func openHelp(_ sender: Any?) {
+        NSWorkspace.shared.open(Self.helpURL)
     }
 }

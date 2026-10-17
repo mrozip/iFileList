@@ -1,0 +1,39 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "Minimize" : {
+      "comment" : "Window menu command.",
+      "localizations" : {
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Minimise"
+          }
+        }
+      }
+    },
+    "Move to Trash" : {
+      "comment" : "File menu and context menu command. Finder says Bin in UK English.",
+      "localizations" : {
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Move to Bin"
+          }
+        }
+      }
+    },
+    "Moving %@ items to the Trash…" : {
+      "comment" : "Status bar while many items move to the Trash. The argument is the formatted count.",
+      "localizations" : {
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Moving %@ items to the Bin…"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

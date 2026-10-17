@@ -43,6 +43,7 @@ final class AppModel {
         didSet {
             guard keepsRunningInMenuBar != oldValue else { return }
             UserDefaults.standard.set(keepsRunningInMenuBar, forKey: Self.keepsRunningInMenuBarKey)
+            presenter.updateStatusItem()
             presenter.updateActivationPolicy()
         }
     }

@@ -4,7 +4,7 @@ import Synchronization
 /// File system changes behind the File and Edit menus. Everything here is synchronous and safe
 /// to run off the main actor; `AppModel` decides where each one runs.
 enum FileOperations {
-    /// One item to copy or move. `replacing` means an existing item at `destination` goes to the
+    /// One item to copy. `replacing` means an existing item at `destination` goes to the
     /// Trash first.
     struct Transfer: Sendable {
         var source: URL
@@ -73,9 +73,9 @@ enum FileOperations {
         return destination
     }
 
-    /// Copies or moves each item, stopping at the first error or when cancelled.
-    static func transfer(
-        _ transfers: [Transfer], moving: Bool, cancel: CancellationFlag,
+    /// Copies each item, stopping at the first error or when cancelled.
+    static func copy(
+        _ transfers: [Transfer], cancel: CancellationFlag,
         progress: @Sendable (Int, Transfer) -> Void
     ) -> Outcome {
         var outcome = Outcome()
@@ -87,11 +87,7 @@ enum FileOperations {
                 if transfer.replacing, exists(transfer.destination) {
                     try manager.trashItem(at: transfer.destination, resultingItemURL: nil)
                 }
-                if moving {
-                    try manager.moveItem(at: transfer.source, to: transfer.destination)
-                } else {
-                    try manager.copyItem(at: transfer.source, to: transfer.destination)
-                }
+                try manager.copyItem(at: transfer.source, to: transfer.destination)
                 outcome.done.append(transfer)
             } catch {
                 outcome.error = error

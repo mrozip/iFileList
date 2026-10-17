@@ -6,7 +6,6 @@ struct ContentView: View {
     @Bindable var model: AppModel
     @FocusState private var searchFocused: Bool
     @State private var dropTargeted = false
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(spacing: 0) {
@@ -58,12 +57,9 @@ struct ContentView: View {
         .searchFocused($searchFocused)
         .onChange(of: model.searchFocusRequest) { focusSearchField() }
         .onAppear {
-            model.presenter.openWindow = openWindow
-            model.windowDidAppear()
             // After the window has set up its first responder, so the list doesn't take focus back.
             Task { @MainActor in focusSearchField() }
         }
-        .onDisappear { model.windowDidDisappear() }
     }
 
     /// Puts the cursor in the search field with the query selected, so typing replaces it.

@@ -1,19 +1,18 @@
 import AppKit
-import SwiftUI
 
-/// Shows and hides the main window from outside SwiftUI views (the global shortcut, the menu bar
-/// icon, Dock clicks), and keeps the Dock icon only while a window is open.
+/// Shows and hides the app's windows (the main window, About and Settings) and its menu bar
+/// icon, for the menus, the global shortcut, the icon and Dock clicks. Keeps the Dock icon only
+/// while a window is open.
 ///
 /// With no window open the app is an accessory, like other menu bar apps. While one is open it's
 /// a regular app, because accessory apps don't show their menu bar and the window relies on it.
 @MainActor
 final class WindowPresenter {
-    static let mainWindowID = "main"
-
     weak var model: AppModel?
-    /// Opens a scene's window when none exists. Captured from a view, since only views get one.
-    var openWindow: OpenWindowAction?
+    private var mainController: MainWindowController?
+    private var aboutController: AboutWindowController?
     private var settingsController: SettingsWindowController?
+    private var statusItem: StatusItemController?
     private var observers: [NSObjectProtocol] = []
 
     init() {
@@ -32,21 +31,21 @@ final class WindowPresenter {
         })
     }
 
-    private var mainWindow: NSWindow? {
-        NSApp.windows.first { $0.identifier?.rawValue.hasPrefix(Self.mainWindowID) == true }
-    }
+    private var mainWindow: NSWindow? { mainController?.window }
 
     /// Brings the main window to the current Space, in front, with the search field focused.
     func showMainWindow() {
+        guard let model else { return }
         activate()
-        if let window = mainWindow, window.isVisible || window.isMiniaturized {
-            window.collectionBehavior.insert(.moveToActiveSpace)
-            if window.isMiniaturized { window.deminiaturize(nil) }
-            window.makeKeyAndOrderFront(nil)
-        } else {
-            openWindow?(id: Self.mainWindowID)
-        }
-        model?.focusSearch()
+        let controller = mainController ?? MainWindowController(model: model)
+        mainController = controller
+        guard let window = controller.window else { return }
+        let wasOpen = window.isVisible || window.isMiniaturized
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        controller.showWindow(nil)
+        if !wasOpen { model.windowDidAppear() }
+        model.focusSearch()
     }
 
     /// The global shortcut: hides the app if its window is already in front, else shows it.
@@ -56,6 +55,13 @@ final class WindowPresenter {
         } else {
             showMainWindow()
         }
+    }
+
+    func showAbout() {
+        activate()
+        let controller = aboutController ?? AboutWindowController()
+        aboutController = controller
+        controller.showWindow(nil)
     }
 
     /// Opens Settings in front, on the current Space.
@@ -69,9 +75,15 @@ final class WindowPresenter {
         controller.window?.makeKeyAndOrderFront(nil)
     }
 
-    /// Closes the main window without quitting, after a launch at login.
-    func closeMainWindow() {
-        mainWindow?.close()
+    /// Shows the menu bar icon while the app keeps running in the menu bar.
+    func updateStatusItem() {
+        guard let model else { return }
+        if model.keepsRunningInMenuBar, statusItem == nil {
+            statusItem = StatusItemController(model: model)
+        } else if !model.keepsRunningInMenuBar, let statusItem {
+            statusItem.remove()
+            self.statusItem = nil
+        }
     }
 
     /// Makes the app a regular one and brings it forward, before showing any of its windows.
@@ -95,7 +107,7 @@ final class WindowPresenter {
     }
 
     private func windowDidBecomeKey(_ window: NSWindow?) {
-        if window?.identifier?.rawValue.hasPrefix(Self.mainWindowID) == true {
+        if window === mainWindow {
             window?.collectionBehavior.insert(.moveToActiveSpace)
         }
         updateActivationPolicy()

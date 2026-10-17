@@ -118,6 +118,7 @@ struct FileTableView: NSViewRepresentable {
         private var rows: [EntryID] = []
         /// What the context menu's items act on, set when it opens.
         private var menuTargets = FileTargets.none
+        private lazy var submenus = FileSubmenus(model: model)
         private var menuClickedRow = -1
         /// The selected files Quick Look shows, and their rows.
         private var previewURLs: [URL] = []
@@ -189,6 +190,7 @@ struct FileTableView: NSViewRepresentable {
             selection.rows = rows
             selection.indexes = tableView.selectedRowIndexes
             model.selection = selection
+            (tableView as? FileListTableView)?.selectionDidChange()
         }
 
         /// The rows an action applies to: the selection if the clicked row is part of it,
@@ -319,10 +321,11 @@ struct FileTableView: NSViewRepresentable {
             guard !ids.isEmpty else { return }
             let targets = model.targets(ids)
             menuTargets = targets
+            submenus.targets = targets
 
             // Finder's order.
             add([.open], to: menu)
-            menu.addItem(openWithItem(for: targets))
+            menu.addItem(submenus.openWithItem())
             menu.addItem(.separator())
             add([.moveToTrash], to: menu)
             menu.addItem(.separator())
@@ -330,7 +333,7 @@ struct FileTableView: NSViewRepresentable {
             menu.addItem(.separator())
             add([.copy, .copyPathname, .share], to: menu)
             menu.addItem(.separator())
-            menu.addItem(tagsItem(for: targets))
+            menu.addItem(submenus.tagsItem())
             menu.addItem(.separator())
             add([.showInFinder], to: menu)
             if ids.count == 1, let entry = model.index.snapshot(ids[0]), let name = folderName(for: entry) {
@@ -350,43 +353,6 @@ struct FileTableView: NSViewRepresentable {
                 item.tag = command.rawValue
                 menu.addItem(item)
             }
-        }
-
-        private func openWithItem(for targets: FileTargets) -> NSMenuItem {
-            let submenu = NSMenu()
-            for app in model.applications(for: targets) {
-                let item = NSMenuItem(
-                    title: app.isDefault ? "\(app.name) (default)" : app.name,
-                    action: #selector(openWithFromMenu(_:)), keyEquivalent: "")
-                item.target = self
-                item.image = app.icon
-                item.representedObject = app.url
-                submenu.addItem(item)
-                if app.isDefault { submenu.addItem(.separator()) }
-            }
-            if submenu.items.last?.isSeparatorItem == false { submenu.addItem(.separator()) }
-            let other = NSMenuItem(title: "Other…", action: #selector(openWithOtherFromMenu(_:)), keyEquivalent: "")
-            other.target = self
-            submenu.addItem(other)
-            let item = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
-            item.submenu = submenu
-            return item
-        }
-
-        private func tagsItem(for targets: FileTargets) -> NSMenuItem {
-            let submenu = NSMenu()
-            let states = model.tagStates(for: targets)
-            for tag in AppModel.finderTags {
-                let item = NSMenuItem(title: tag.name, action: #selector(toggleTagFromMenu(_:)), keyEquivalent: "")
-                item.target = self
-                item.image = tag.image
-                item.state = states[tag.name] ?? .off
-                item.representedObject = tag.name
-                submenu.addItem(item)
-            }
-            let item = NSMenuItem(title: "Tags", action: nil, keyEquivalent: "")
-            item.submenu = submenu
-            return item
         }
 
         /// The folder a row filters to: the row itself for a folder, else its enclosing folder.
@@ -409,18 +375,6 @@ struct FileTableView: NSViewRepresentable {
                 tableView.selectRowIndexes([menuClickedRow], byExtendingSelection: false)
             }
             model.perform(command, on: menuTargets)
-        }
-
-        @objc private func openWithFromMenu(_ sender: NSMenuItem) {
-            if let application = sender.representedObject as? URL { model.open(menuTargets, with: application) }
-        }
-
-        @objc private func openWithOtherFromMenu(_ sender: NSMenuItem) {
-            model.openWithOtherApplication(menuTargets)
-        }
-
-        @objc private func toggleTagFromMenu(_ sender: NSMenuItem) {
-            if let tag = sender.representedObject as? String { model.toggleTag(tag, on: menuTargets) }
         }
 
         @objc private func filterToFolderFromMenu(_ sender: NSMenuItem) {
@@ -568,15 +522,16 @@ extension FileTableView.Coordinator: @preconcurrency QLPreviewPanelDataSource, @
 
 // MARK: - Table view
 
-/// Opens the selection with Return, toggles Quick Look with Space, and handles Copy and Paste for
-/// files while it has focus. Reports focus to the model, so the menu bar's file
-/// commands are enabled only then.
-final class FileListTableView: NSTableView {
+/// Opens the selection with Return and toggles Quick Look with Space. While it has focus, the menu
+/// bar's file commands and Copy and Paste reach it through the responder chain; it enables them
+/// and gives them Finder's titles for the selection.
+final class FileListTableView: NSTableView, NSMenuItemValidation {
     var onOpen: (() -> Void)?
     var onQuickLook: (() -> Void)?
     weak var model: AppModel?
     weak var previewSource: FileTableView.Coordinator?
-    private var keyObservers: [NSObjectProtocol] = []
+    /// Worked out once per selection rather than for every menu item validated.
+    private var cachedTargets: FileTargets?
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
@@ -592,63 +547,67 @@ final class FileListTableView: NSTableView {
         }
     }
 
-    // MARK: Focus
+    // MARK: Menu bar
 
-    override func becomeFirstResponder() -> Bool {
-        let became = super.becomeFirstResponder()
-        reportFocus(isFirstResponder: became)
-        return became
+    var selectionTargets: FileTargets {
+        if let cachedTargets { return cachedTargets }
+        let targets = model?.selectionTargets ?? .none
+        cachedTargets = targets
+        return targets
     }
 
-    override func resignFirstResponder() -> Bool {
-        let resigned = super.resignFirstResponder()
-        if resigned { reportFocus(isFirstResponder: false) }
-        return resigned
+    func selectionDidChange() {
+        cachedTargets = nil
     }
 
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        keyObservers.forEach(NotificationCenter.default.removeObserver)
-        keyObservers = []
-        guard window != nil else { return }
-        // Any window: Quick Look's panel becoming key leaves the list in charge.
-        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
-            keyObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) {
-                [weak self] _ in
-                MainActor.assumeIsolated { self?.reportFocus() }
-            })
-        }
+    /// A File menu item for one of the shared commands, identified by its tag.
+    @objc func performFileCommand(_ sender: NSMenuItem) {
+        guard let model, let command = FileCommand(rawValue: sender.tag) else { return }
+        model.perform(command, on: selectionTargets)
     }
 
-    private func reportFocus(isFirstResponder: Bool? = nil) {
-        guard let model, let window else { return }
-        let first = isFirstResponder ?? (window.firstResponder === self)
-        let key = window.isKeyWindow || NSApp.keyWindow is QLPreviewPanel
-        let focused = first && key
-        if model.selection.listIsFocused != focused { model.selection.listIsFocused = focused }
-    }
-
-    // MARK: Edit menu
+    /// The Open With and Tags items. Their submenus act; these only enable them.
+    @objc func showOpenWith(_ sender: Any?) {}
+    @objc func showTags(_ sender: Any?) {}
 
     @objc func copy(_ sender: Any?) {
-        guard let model else { return }
-        model.perform(.copy, on: model.selectionTargets)
+        model?.perform(.copy, on: selectionTargets)
     }
 
     @objc func paste(_ sender: Any?) {
-        model?.paste(moving: false)
+        model?.paste()
     }
 
-    override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
-        guard let model else { return super.validateUserInterfaceItem(item) }
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard let model else { return false }
         switch item.action {
+        case #selector(performFileCommand(_:)):
+            guard let command = FileCommand(rawValue: item.tag) else { return false }
+            return validate(item, for: command)
+        case #selector(showOpenWith(_:)):
+            return FileCommand.open.isAvailable(for: selectionTargets)
+        case #selector(showTags(_:)):
+            return !selectionTargets.isEmpty
         case #selector(copy(_:)):
-            return numberOfSelectedRows > 0
+            return validate(item, for: .copy)
         case #selector(paste(_:)):
-            return model.hasTargetFolder && FileActions.canPaste
+            let count = FileActions.pastedFiles().count
+            item.title = switch count {
+            case 0: "Paste"
+            case 1: "Paste Item"
+            default: "Paste \(count.formatted()) Items"
+            }
+            return count > 0 && model.hasTargetFolder
         default:
             return super.validateUserInterfaceItem(item)
         }
+    }
+
+    /// Like Finder, names the selection only in items that can act on it.
+    private func validate(_ item: NSMenuItem, for command: FileCommand) -> Bool {
+        let isAvailable = command.isAvailable(for: selectionTargets)
+        item.title = command.title(for: isAvailable ? selectionTargets : .none)
+        return isAvailable
     }
 
     // MARK: Quick Look

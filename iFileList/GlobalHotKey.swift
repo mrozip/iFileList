@@ -1,6 +1,5 @@
 import AppKit
 import Carbon.HIToolbox
-import SwiftUI
 
 /// A key combination that works system-wide, saved as its virtual key code and modifiers so it
 /// doesn't depend on the keyboard layout. `key` is the key's name as recorded, for display.
@@ -43,34 +42,29 @@ struct GlobalShortcut: Equatable, Sendable {
         return text + key
     }
 
-    /// The same shortcut for a SwiftUI menu item, or nil for keys menus can't show.
-    var menuShortcut: KeyboardShortcut? {
-        let equivalent: KeyEquivalent
+    /// The same shortcut as a menu item's key equivalent, or nil for keys menus can't show.
+    var menuKeyEquivalent: String? {
         switch Int(keyCode) {
-        case kVK_Space: equivalent = .space
-        case kVK_Return: equivalent = .return
-        case kVK_Tab: equivalent = .tab
-        case kVK_Delete: equivalent = .delete
-        case kVK_ForwardDelete: equivalent = .deleteForward
-        case kVK_Escape: equivalent = .escape
-        case kVK_LeftArrow: equivalent = .leftArrow
-        case kVK_RightArrow: equivalent = .rightArrow
-        case kVK_UpArrow: equivalent = .upArrow
-        case kVK_DownArrow: equivalent = .downArrow
-        case kVK_Home: equivalent = .home
-        case kVK_End: equivalent = .end
-        case kVK_PageUp: equivalent = .pageUp
-        case kVK_PageDown: equivalent = .pageDown
-        default:
-            guard key.count == 1, let character = key.lowercased().first else { return nil }
-            equivalent = KeyEquivalent(character)
+        case kVK_Space: " "
+        case kVK_Return: "\r"
+        case kVK_Tab: "\t"
+        case kVK_Delete: "\u{8}"
+        case kVK_ForwardDelete: "\u{7F}"
+        case kVK_Escape: "\u{1B}"
+        case kVK_LeftArrow: Self.functionKey(NSLeftArrowFunctionKey)
+        case kVK_RightArrow: Self.functionKey(NSRightArrowFunctionKey)
+        case kVK_UpArrow: Self.functionKey(NSUpArrowFunctionKey)
+        case kVK_DownArrow: Self.functionKey(NSDownArrowFunctionKey)
+        case kVK_Home: Self.functionKey(NSHomeFunctionKey)
+        case kVK_End: Self.functionKey(NSEndFunctionKey)
+        case kVK_PageUp: Self.functionKey(NSPageUpFunctionKey)
+        case kVK_PageDown: Self.functionKey(NSPageDownFunctionKey)
+        default: key.count == 1 ? key.lowercased() : nil
         }
-        var eventModifiers: SwiftUI.EventModifiers = []
-        if modifiers.contains(.control) { eventModifiers.insert(.control) }
-        if modifiers.contains(.option) { eventModifiers.insert(.option) }
-        if modifiers.contains(.shift) { eventModifiers.insert(.shift) }
-        if modifiers.contains(.command) { eventModifiers.insert(.command) }
-        return KeyboardShortcut(equivalent, modifiers: eventModifiers)
+    }
+
+    private static func functionKey(_ key: Int) -> String {
+        UnicodeScalar(key).map { String(Character($0)) } ?? ""
     }
 
     var carbonModifiers: UInt32 {

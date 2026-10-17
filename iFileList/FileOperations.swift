@@ -1,8 +1,8 @@
 import AppKit
-import Synchronization
 
 /// File system changes behind the File and Edit menus. Everything here is synchronous and safe
-/// to run off the main actor; `AppModel` decides where each one runs.
+/// to run off the main actor; `AppModel` decides where each one runs. The long ones stop between
+/// items when their task is cancelled.
 enum FileOperations {
     /// One item to copy. `replacing` means an existing item at `destination` goes to the
     /// Trash first.
@@ -74,14 +74,11 @@ enum FileOperations {
     }
 
     /// Copies each item, stopping at the first error or when cancelled.
-    static func copy(
-        _ transfers: [Transfer], cancel: CancellationFlag,
-        progress: @Sendable (Int, Transfer) -> Void
-    ) -> Outcome {
+    static func copy(_ transfers: [Transfer], progress: (Int, Transfer) -> Void) -> Outcome {
         var outcome = Outcome()
         let manager = FileManager.default
         for (number, transfer) in transfers.enumerated() {
-            guard !cancel.isCancelled else { break }
+            guard !Task.isCancelled else { break }
             progress(number, transfer)
             do {
                 if transfer.replacing, exists(transfer.destination) {
@@ -98,12 +95,10 @@ enum FileOperations {
     }
 
     /// Deletes each item for good. Returns the items deleted and the first error.
-    static func delete(
-        _ urls: [URL], cancel: CancellationFlag, progress: @Sendable (Int, URL) -> Void
-    ) -> (deleted: [URL], error: (any Error)?) {
+    static func delete(_ urls: [URL], progress: (Int, URL) -> Void) -> (deleted: [URL], error: (any Error)?) {
         var deleted: [URL] = []
         for (number, url) in urls.enumerated() {
-            guard !cancel.isCancelled else { break }
+            guard !Task.isCancelled else { break }
             progress(number, url)
             do {
                 try FileManager.default.removeItem(at: url)
@@ -133,11 +128,11 @@ enum FileOperations {
 
     /// Zips items the way Finder's Compress does: one item into "name.zip" next to it, several into
     /// "Archive.zip" in `folder`. Returns the archive.
-    static func compress(_ urls: [URL], into folder: URL, cancel: CancellationFlag) throws -> URL {
+    static func compress(_ urls: [URL], into folder: URL) throws -> URL {
         let manager = FileManager.default
         if urls.count == 1 {
             let archive = available(folder.appendingPathComponent(urls[0].lastPathComponent + ".zip"))
-            try runDitto(["-c", "-k", "--sequesterRsrc", "--keepParent", urls[0].path, archive.path], output: archive, cancel: cancel)
+            try runDitto(["-c", "-k", "--sequesterRsrc", "--keepParent", urls[0].path, archive.path], output: archive)
             return archive
         }
         // ditto archives one folder, so gather the items in a temporary one on the same volume,
@@ -145,15 +140,15 @@ enum FileOperations {
         let staging = try manager.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: folder, create: true)
         defer { try? manager.removeItem(at: staging) }
         for url in urls {
-            guard !cancel.isCancelled else { throw CocoaError(.userCancelled) }
+            guard !Task.isCancelled else { throw CocoaError(.userCancelled) }
             try manager.copyItem(at: url, to: available(staging.appendingPathComponent(url.lastPathComponent)))
         }
         let archive = available(folder.appendingPathComponent("Archive.zip"))
-        try runDitto(["-c", "-k", "--sequesterRsrc", staging.path, archive.path], output: archive, cancel: cancel)
+        try runDitto(["-c", "-k", "--sequesterRsrc", staging.path, archive.path], output: archive)
         return archive
     }
 
-    private static func runDitto(_ arguments: [String], output: URL, cancel: CancellationFlag) throws {
+    private static func runDitto(_ arguments: [String], output: URL) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         process.arguments = arguments
@@ -161,10 +156,10 @@ enum FileOperations {
         process.standardError = errors
         try process.run()
         while process.isRunning {
-            if cancel.isCancelled { process.terminate() }
+            if Task.isCancelled { process.terminate() }
             usleep(50_000)
         }
-        if cancel.isCancelled {
+        if Task.isCancelled {
             try? FileManager.default.removeItem(at: output)
             throw CocoaError(.userCancelled)
         }
@@ -187,12 +182,4 @@ enum FileOperations {
     static func setTags(_ tags: [String], of url: URL) throws {
         try (URL(fileURLWithPath: url.path) as NSURL).setResourceValue(tags, forKey: .tagNamesKey)
     }
-}
-
-/// Asks a background file operation to stop between items.
-final class CancellationFlag: Sendable {
-    private let value = Atomic<Bool>(false)
-
-    var isCancelled: Bool { value.load(ordering: .relaxed) }
-    func cancel() { value.store(true, ordering: .relaxed) }
 }

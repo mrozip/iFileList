@@ -2,10 +2,12 @@ import AppKit
 import FileIndexKit
 import UniformTypeIdentifiers
 
-/// A background file operation's line in the status bar. `cancel` is nil when it can't be stopped.
+/// A background file operation's line in the status bar.
 struct FileOperationProgress {
+    var id = UUID()
     var text: String
-    let cancel: CancellationFlag?
+    /// Cancels the operation's task; nil when it can't be stopped.
+    let stop: (() -> Void)?
 }
 
 /// Entries to select once results searched at `indexVersion` or later are shown.
@@ -88,19 +90,20 @@ extension AppModel {
 
     // MARK: Running operations
 
-    /// Runs `work` off the main actor with a line in the status bar and a Stop button. `work` can
-    /// update the line through its second argument.
+    /// Runs `work` in a detached task with a line in the status bar and a Stop button, which
+    /// cancels the task. `work` can update the line through its argument.
     func runInBackground<T: Sendable>(
-        _ text: String, _ work: @escaping @Sendable (CancellationFlag, @escaping @Sendable (String) -> Void) -> T
+        _ text: String, _ work: @escaping @Sendable (_ update: @escaping @Sendable (String) -> Void) -> T
     ) async -> T {
-        let cancel = CancellationFlag()
-        operation = FileOperationProgress(text: text, cancel: cancel)
+        let id = UUID()
         let update: @Sendable (String) -> Void = { [weak self] text in
             Task { @MainActor in
-                if let self, self.operation?.cancel === cancel { self.operation?.text = text }
+                if let self, self.operation?.id == id { self.operation?.text = text }
             }
         }
-        let result = await Task.detached(priority: .userInitiated) { work(cancel, update) }.value
+        let task = Task.detached(priority: .userInitiated) { work(update) }
+        operation = FileOperationProgress(id: id, text: text, stop: task.cancel)
+        let result = await task.value
         operation = nil
         return result
     }
@@ -142,7 +145,7 @@ extension AppModel {
         let showsProgress = urls.count > 20 && operation == nil
         if showsProgress {
             let text = String(localized: "Moving \(urls.count.formatted()) items to the Trash…")
-            operation = FileOperationProgress(text: text, cancel: nil)
+            operation = FileOperationProgress(text: text, stop: nil)
         }
         NSWorkspace.shared.recycle(urls) { [weak self] map, error in
             Task { @MainActor in
@@ -170,8 +173,8 @@ extension AppModel {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         Task {
             let total = urls.count
-            let (deleted, error) = await runInBackground("Deleting \(total.formatted()) items…") { cancel, update in
-                FileOperations.delete(urls, cancel: cancel) { number, url in
+            let (deleted, error) = await runInBackground("Deleting \(total.formatted()) items…") { update in
+                FileOperations.delete(urls) { number, url in
                     update("Deleting “\(url.lastPathComponent)” (\((number + 1).formatted()) of \(total.formatted()))…")
                 }
             }
@@ -186,7 +189,7 @@ extension AppModel {
     func duplicate(_ urls: [URL]) {
         guard !urls.isEmpty, confirmMany(urls.count, action: "Duplicate"), canStartOperation else { return }
         let name = urls.count == 1 ? "“\(urls[0].lastPathComponent)”" : "\(urls.count.formatted()) items"
-        operation = FileOperationProgress(text: "Duplicating \(name)…", cancel: nil)
+        operation = FileOperationProgress(text: "Duplicating \(name)…", stop: nil)
         NSWorkspace.shared.duplicate(urls) { [weak self] map, error in
             Task { @MainActor in
                 guard let self else { return }
@@ -209,8 +212,8 @@ extension AppModel {
         let folder = first.deletingLastPathComponent()
         let text = urls.count == 1 ? "Compressing “\(first.lastPathComponent)”…" : "Compressing \(urls.count.formatted()) items…"
         Task {
-            let result = await runInBackground(text) { cancel, _ in
-                Result { try FileOperations.compress(urls, into: folder, cancel: cancel) }
+            let result = await runInBackground(text) { _ in
+                Result { try FileOperations.compress(urls, into: folder) }
             }
             switch result {
             case .success(let archive): select([archive])
@@ -430,8 +433,8 @@ extension AppModel {
         let planned = transfers
         Task {
             let total = planned.count
-            let outcome = await runInBackground("Copying \(total.formatted()) items…") { cancel, update in
-                FileOperations.copy(planned, cancel: cancel) { number, transfer in
+            let outcome = await runInBackground("Copying \(total.formatted()) items…") { update in
+                FileOperations.copy(planned) { number, transfer in
                     update("Copying “\(transfer.source.lastPathComponent)” (\((number + 1).formatted()) of \(total.formatted()))…")
                 }
             }

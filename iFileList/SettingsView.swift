@@ -20,6 +20,7 @@ final class SettingsWindowController: NSWindowController {
         let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable]
         window.toolbarStyle = .preference
+        window.collectionBehavior.insert(.moveToActiveSpace)
         window.isReleasedWhenClosed = false
         window.center()
         window.setFrameAutosaveName("Settings")

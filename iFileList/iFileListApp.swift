@@ -16,6 +16,7 @@ enum iFileListApp {
 /// bar's commands that need no window.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static let projectURL = URL(string: "https://github.com/mrozip/iFileList")!
     static let helpURL = URL(string: "https://github.com/mrozip/iFileList#readme")!
 
     let model = AppModel()

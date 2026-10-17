@@ -23,6 +23,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         window.title = "iFileList"
         window.identifier = Self.identifier
         window.toolbarStyle = .unified
+        // The global shortcut brings it to the current Space instead of switching Spaces.
+        window.collectionBehavior.insert(.moveToActiveSpace)
         window.isReleasedWhenClosed = false
         window.setContentSize(NSSize(width: 1100, height: 700))
         window.center()

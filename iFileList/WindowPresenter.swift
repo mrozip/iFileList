@@ -1,7 +1,7 @@
 import AppKit
 
-/// Shows and hides the app's windows (the main window, About and Settings) and its menu bar
-/// icon, for the menus, the global shortcut, the icon and Dock clicks. Keeps the Dock icon only
+/// Shows and hides the app's windows (the main window, Settings and the standard About panel)
+/// and its menu bar icon, for the menus, the global shortcut, the icon and Dock clicks. Keeps the Dock icon only
 /// while a window is open.
 ///
 /// With no window open the app is an accessory, like other menu bar apps. While one is open it's
@@ -10,7 +10,6 @@ import AppKit
 final class WindowPresenter {
     weak var model: AppModel?
     private var mainController: MainWindowController?
-    private var aboutController: AboutWindowController?
     private var settingsController: SettingsWindowController?
     private var statusItem: StatusItemController?
     private var observers: [NSObjectProtocol] = []
@@ -19,9 +18,8 @@ final class WindowPresenter {
         let center = NotificationCenter.default
         observers.append(center.addObserver(
             forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
-        ) { [weak self] notification in
-            let window = notification.object as? NSWindow
-            MainActor.assumeIsolated { self?.windowDidBecomeKey(window) }
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateActivationPolicy() }
         })
         observers.append(center.addObserver(
             forName: NSWindow.willCloseNotification, object: nil, queue: .main
@@ -41,7 +39,6 @@ final class WindowPresenter {
         mainController = controller
         guard let window = controller.window else { return }
         let wasOpen = window.isVisible || window.isMiniaturized
-        window.collectionBehavior.insert(.moveToActiveSpace)
         if window.isMiniaturized { window.deminiaturize(nil) }
         controller.showWindow(nil)
         if !wasOpen { model.windowDidAppear() }
@@ -57,11 +54,17 @@ final class WindowPresenter {
         }
     }
 
+    /// The standard About panel, with a link to the project as its credits.
     func showAbout() {
         activate()
-        let controller = aboutController ?? AboutWindowController()
-        aboutController = controller
-        controller.showWindow(nil)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let credits = NSAttributedString(string: AppDelegate.projectURL.absoluteString, attributes: [
+            .link: AppDelegate.projectURL,
+            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+            .paragraphStyle: paragraph,
+        ])
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
     }
 
     /// Opens Settings in front, on the current Space.
@@ -70,7 +73,6 @@ final class WindowPresenter {
         activate()
         let controller = settingsController ?? SettingsWindowController(model: model)
         settingsController = controller
-        controller.window?.collectionBehavior.insert(.moveToActiveSpace)
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
     }
@@ -104,12 +106,5 @@ final class WindowPresenter {
     /// bar icon's own window have no title bar.
     private var hasOpenWindow: Bool {
         NSApp.windows.contains { $0.isVisible && $0.styleMask.contains(.titled) }
-    }
-
-    private func windowDidBecomeKey(_ window: NSWindow?) {
-        if window === mainWindow {
-            window?.collectionBehavior.insert(.moveToActiveSpace)
-        }
-        updateActivationPolicy()
     }
 }

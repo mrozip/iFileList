@@ -121,8 +121,8 @@ private struct StatusBar: View {
                 Text(operation.text)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                if let cancel = operation.cancel {
-                    Button("Stop") { cancel.cancel() }
+                if let stop = operation.stop {
+                    Button("Stop", action: stop)
                         .buttonStyle(.link)
                 }
             } else {

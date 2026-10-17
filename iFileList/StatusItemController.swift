@@ -36,13 +36,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             search.keyEquivalentModifierMask = shortcut.modifiers
         }
         menu.addItem(search)
-        menu.addItem(item("Rescan All Volumes", #selector(rescan(_:))))
+        menu.addItem(item("Rescan All Volumes", #selector(AppDelegate.rescanAllVolumes(_:))))
         if !model.hasFullDiskAccess {
             menu.addItem(item("Grant Full Disk Access…", #selector(grantFullDiskAccess(_:))))
         }
         menu.addItem(.separator())
-        menu.addItem(item("About iFileList", #selector(showAbout(_:))))
-        menu.addItem(item("Settings…", #selector(showSettings(_:)), ","))
+        menu.addItem(item("About iFileList", #selector(AppDelegate.showAbout(_:))))
+        menu.addItem(item("Settings…", #selector(AppDelegate.showSettings(_:)), ","))
         menu.addItem(.separator())
         menu.addItem(item("Quit iFileList", #selector(NSApplication.terminate(_:)), "q"))
     }
@@ -66,9 +66,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
+    /// Items for this controller's own actions target it; the rest have no target, so the
+    /// responder chain takes them to `AppDelegate` or the app.
     private func item(_ title: String, _ action: Selector, _ key: String = "") -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
-        if action != #selector(NSApplication.terminate(_:)) { item.target = self }
+        if responds(to: action) { item.target = self }
         return item
     }
 
@@ -76,19 +78,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         model.presenter.showMainWindow()
     }
 
-    @objc private func rescan(_ sender: Any?) {
-        model.rescan()
-    }
-
     @objc private func grantFullDiskAccess(_ sender: Any?) {
         FullDiskAccess.openSystemSettings()
-    }
-
-    @objc private func showAbout(_ sender: Any?) {
-        model.presenter.showAbout()
-    }
-
-    @objc private func showSettings(_ sender: Any?) {
-        model.presenter.showSettings()
     }
 }

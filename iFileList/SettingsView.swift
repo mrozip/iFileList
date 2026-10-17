@@ -1,9 +1,109 @@
 import AppKit
 import FileIndexKit
+import ServiceManagement
 import SwiftUI
 
-/// The Settings window (iFileList › Settings…, ⌘,): which volumes are indexed and what is left out.
-struct SettingsView: View {
+/// The Settings window (iFileList › Settings…, ⌘,). Like Finder's, it's an AppKit tab view
+/// controller with one toolbar item per pane, which SwiftUI's `Settings` scene doesn't match:
+/// its tabs highlight on hover.
+@MainActor
+final class SettingsWindowController: NSWindowController {
+    init(model: AppModel) {
+        let tabs = NSTabViewController()
+        tabs.tabStyle = .toolbar
+        // The window takes its title from the controller; keep it rather than the pane's.
+        tabs.title = "iFileList Settings"
+        tabs.canPropagateSelectedChildViewControllerTitle = false
+        tabs.addTabViewItem(Self.pane("General", symbol: "gearshape", GeneralSettingsView(model: model)))
+        tabs.addTabViewItem(Self.pane("Index", symbol: "internaldrive", IndexSettingsView(model: model)))
+
+        let window = NSWindow(contentViewController: tabs)
+        window.styleMask = [.titled, .closable]
+        window.toolbarStyle = .preference
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.setFrameAutosaveName("Settings")
+        super.init(window: window)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    /// A pane that sizes the window to its content, so each tab gets the height it needs.
+    private static func pane(_ title: String, symbol: String, _ view: some View) -> NSTabViewItem {
+        let controller = NSHostingController(rootView: view.frame(width: 520))
+        controller.sizingOptions = .preferredContentSize
+        let item = NSTabViewItem(viewController: controller)
+        item.label = title
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        return item
+    }
+}
+
+/// Running in the background and the global search shortcut.
+struct GeneralSettingsView: View {
+    @Bindable var model: AppModel
+    @State private var loginStatus = LaunchAtLogin.status
+    @State private var loginError: String?
+
+    var body: some View {
+        Form {
+            Section("Background") {
+                Toggle(isOn: $model.keepsRunningInMenuBar) {
+                    Text("Keep running in the menu bar")
+                    Text("Closing the window leaves iFileList keeping the index up to date. Quit from the menu bar icon.")
+                }
+                Toggle(isOn: launchesAtLogin) {
+                    Text("Launch at login")
+                    if let loginError {
+                        Text(loginError).foregroundStyle(.red)
+                    } else if loginStatus == .requiresApproval {
+                        Text("Allow iFileList in System Settings › General › Login Items.")
+                    }
+                }
+                if loginStatus == .requiresApproval {
+                    Button("Open Login Items Settings") { LaunchAtLogin.openSystemSettings() }
+                }
+            }
+            Section("Global Search") {
+                LabeledContent {
+                    ShortcutRecorder(model: model)
+                } label: {
+                    Text("Search shortcut")
+                    if model.globalShortcutIsTaken {
+                        Text("Another app uses this shortcut. Choose a different one.").foregroundStyle(.red)
+                    } else {
+                        Text("Shows the iFileList window from any app.")
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .fixedSize(horizontal: false, vertical: true)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            loginStatus = LaunchAtLogin.status  // may have changed in System Settings
+        }
+    }
+
+    private var launchesAtLogin: Binding<Bool> {
+        Binding {
+            loginStatus == .enabled || loginStatus == .requiresApproval
+        } set: { enabled in
+            do {
+                try LaunchAtLogin.setEnabled(enabled)
+                loginError = nil
+            } catch {
+                loginError = error.localizedDescription
+            }
+            loginStatus = LaunchAtLogin.status
+        }
+    }
+}
+
+/// Which volumes are indexed and what is left out.
+struct IndexSettingsView: View {
     @Bindable var model: AppModel
     @State private var selection: Set<String> = []
 
@@ -54,7 +154,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
     }
 

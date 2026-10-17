@@ -48,9 +48,21 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE=nota
 
 Searching by filename or path is supported.
 
+## Menu bar and global shortcut
+
+Closing the window leaves iFileList running in the menu bar, so the index stays up to date. Press ⌃⌥Space or choose **Search iFileList** from the menu bar icon to restore or hide the window.
+
 ## Settings
 
-Open **iFileList › Settings…** (⌘,) to choose what is indexed. The startup disk is always indexed.
+Open **iFileList › Settings…** (⌘,).
+
+**General**
+
+- **Keep running in the menu bar**: Turn off to quit when the window closes.
+- **Launch at login**: Start in the menu bar when you log in.
+- **Search shortcut**: Click it and press a new shortcut. Escape cancels; Delete removes it.
+
+**Index** (the startup disk is always indexed)
 
 - **Index external drives**: USB, Thunderbolt, mounted disk images.
 - **Index network drives**: Mounted network shares. Requires a full rescan (⌘R) or restart.
@@ -62,6 +74,7 @@ Most common Finder shortcuts are available.
 
 | Shortcut | Action |
 | --- | --- |
+| ⌃⌥Space | Show or hide iFileList from any app |
 | ⌘F | Focus the search field |
 | ⇧⌘F | Filter by folder |
 | ⌥⌘F | Clear filters |

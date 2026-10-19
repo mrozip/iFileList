@@ -86,20 +86,14 @@ enum FileActions {
         return (objects as? [URL]) ?? []
     }
 
-    static var canPaste: Bool {
-        NSPasteboard.general.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
-    }
-
     // MARK: Finder
 
     static func revealInFinder(_ urls: [URL]) {
         NSWorkspace.shared.activateFileViewerSelecting(urls)
     }
 
-    /// Opens Finder's Get Info window for each file.
-    ///
-    /// Uses Finder's own "Show Info" service, which needs no Automation permission. If the
-    /// service is unavailable, falls back to asking Finder over Apple Events.
+    /// Opens Finder's Get Info window for each file, through Finder's own "Show Info" service,
+    /// which needs no Automation permission. If the service is unavailable, reveals the files.
     static func showInfo(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
         let pasteboard = NSPasteboard(name: NSPasteboard.Name("com.mrozip.iFileList.showInfo"))
@@ -112,27 +106,7 @@ enum FileActions {
         if NSPerformService("Finder/Show Info", pasteboard) {
             NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first?.activate()
         } else {
-            showInfoWithAppleScript(urls)
-        }
-    }
-
-    private static func showInfoWithAppleScript(_ urls: [URL]) {
-        let files = urls.map { url in
-            let escaped = url.path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-            return "POSIX file \"\(escaped)\""
-        }
-        let source = """
-            tell application "Finder"
-                activate
-                repeat with f in {\(files.joined(separator: ", "))}
-                    open information window of (f as alias)
-                end repeat
-            end tell
-            """
-        var error: NSDictionary?
-        NSAppleScript(source: source)?.executeAndReturnError(&error)
-        if let error {
-            NSLog("Get Info via Finder failed: %@", error)
+            revealInFinder(urls)
         }
     }
 }

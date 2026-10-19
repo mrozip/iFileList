@@ -6,12 +6,8 @@ import FileIndexKit
 struct FileSelection {
     var rows: [EntryID] = []
     var indexes = IndexSet()
-    /// The list is first responder in the key window. Menu shortcuts act on files only then, so
-    /// ⌘⌫ or ⌘C in the search field still edit text.
-    var listIsFocused = false
 
     var count: Int { indexes.count }
-    var isActive: Bool { listIsFocused && !indexes.isEmpty }
     var ids: [EntryID] { indexes.compactMap { $0 < rows.count ? rows[$0] : nil } }
 
     /// The first `limit` selected IDs, without resolving the rest.
@@ -136,7 +132,8 @@ enum FileCommand: Int, CaseIterable {
         case (.quickLook, _): "Quick Look \(count) Items"
         case (.showOriginal, _): "Show Original"
         case (.share, _): "Share…"
-        case (.moveToTrash, _): "Move to Trash"
+        // "Move to Bin" in UK English, as in Finder.
+        case (.moveToTrash, _): String(localized: "Move to Trash")
         case (.deleteImmediately, _): "Delete Immediately…"
         case (.eject, 1): "Eject “\(name)”"
         case (.eject, _): "Eject"
@@ -175,4 +172,75 @@ protocol FileListController: AnyObject {
     func toggleQuickLook()
     /// Shows the share picker under the selected item.
     func share(_ urls: [URL])
+}
+
+/// The Open With and Tags submenus, for the context menu and the File menu. Their items act on
+/// `targets`, which the owner sets before building or filling them.
+@MainActor
+final class FileSubmenus: NSObject {
+    private let model: AppModel
+    var targets = FileTargets.none
+
+    init(model: AppModel) {
+        self.model = model
+    }
+
+    func openWithItem() -> NSMenuItem {
+        let submenu = NSMenu()
+        fillOpenWith(submenu)
+        let item = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        return item
+    }
+
+    func tagsItem() -> NSMenuItem {
+        let submenu = NSMenu()
+        fillTags(submenu)
+        let item = NSMenuItem(title: "Tags", action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        return item
+    }
+
+    func fillOpenWith(_ menu: NSMenu) {
+        menu.removeAllItems()
+        for app in model.applications(for: targets) {
+            let item = NSMenuItem(
+                title: app.isDefault ? "\(app.name) (default)" : app.name,
+                action: #selector(openWith(_:)), keyEquivalent: "")
+            item.target = self
+            item.image = app.icon
+            item.representedObject = app.url
+            menu.addItem(item)
+            if app.isDefault { menu.addItem(.separator()) }
+        }
+        if menu.items.last?.isSeparatorItem == false { menu.addItem(.separator()) }
+        let other = NSMenuItem(title: "Other…", action: #selector(openWithOther(_:)), keyEquivalent: "")
+        other.target = self
+        menu.addItem(other)
+    }
+
+    func fillTags(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let states = model.tagStates(for: targets)
+        for tag in AppModel.finderTags {
+            let item = NSMenuItem(title: tag.name, action: #selector(toggleTag(_:)), keyEquivalent: "")
+            item.target = self
+            item.image = tag.image
+            item.state = states[tag.name] ?? .off
+            item.representedObject = tag.name
+            menu.addItem(item)
+        }
+    }
+
+    @objc private func openWith(_ sender: NSMenuItem) {
+        if let application = sender.representedObject as? URL { model.open(targets, with: application) }
+    }
+
+    @objc private func openWithOther(_ sender: NSMenuItem) {
+        model.openWithOtherApplication(targets)
+    }
+
+    @objc private func toggleTag(_ sender: NSMenuItem) {
+        if let tag = sender.representedObject as? String { model.toggleTag(tag, on: targets) }
+    }
 }

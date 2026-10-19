@@ -2,10 +2,12 @@ import AppKit
 import FileIndexKit
 import UniformTypeIdentifiers
 
-/// A background file operation's line in the status bar. `cancel` is nil when it can't be stopped.
+/// A background file operation's line in the status bar.
 struct FileOperationProgress {
+    var id = UUID()
     var text: String
-    let cancel: CancellationFlag?
+    /// Cancels the operation's task; nil when it can't be stopped.
+    let stop: (() -> Void)?
 }
 
 /// Entries to select once results searched at `indexVersion` or later are shown.
@@ -25,9 +27,9 @@ struct FinderTag: Identifiable {
 // MARK: - Commands
 
 extension AppModel {
-    /// The selection, for the menu bar's commands; empty while the list isn't focused.
+    /// The selection, for the menu bar's commands. They reach the list only while it has focus.
     var selectionTargets: FileTargets {
-        selection.isActive ? FileTargets(selection: selection, index: index) : .none
+        FileTargets(selection: selection, index: index)
     }
 
     func targets(_ ids: [EntryID]) -> FileTargets {
@@ -61,7 +63,7 @@ extension AppModel {
         }
     }
 
-    /// New Folder, Paste and Move Item Here put items in the filtered folder; without a folder
+    /// New Folder and Paste put items in the filtered folder; without a folder
     /// filter there is no current folder, as in Finder's search results.
     var hasTargetFolder: Bool { filters.folder != nil && !showsAccessOnboarding }
 
@@ -88,19 +90,20 @@ extension AppModel {
 
     // MARK: Running operations
 
-    /// Runs `work` off the main actor with a line in the status bar and a Stop button. `work` can
-    /// update the line through its second argument.
+    /// Runs `work` in a detached task with a line in the status bar and a Stop button, which
+    /// cancels the task. `work` can update the line through its argument.
     func runInBackground<T: Sendable>(
-        _ text: String, _ work: @escaping @Sendable (CancellationFlag, @escaping @Sendable (String) -> Void) -> T
+        _ text: String, _ work: @escaping @Sendable (_ update: @escaping @Sendable (String) -> Void) -> T
     ) async -> T {
-        let cancel = CancellationFlag()
-        operation = FileOperationProgress(text: text, cancel: cancel)
+        let id = UUID()
         let update: @Sendable (String) -> Void = { [weak self] text in
             Task { @MainActor in
-                if let self, self.operation?.cancel === cancel { self.operation?.text = text }
+                if let self, self.operation?.id == id { self.operation?.text = text }
             }
         }
-        let result = await Task.detached(priority: .userInitiated) { work(cancel, update) }.value
+        let task = Task.detached(priority: .userInitiated) { work(update) }
+        operation = FileOperationProgress(id: id, text: text, stop: task.cancel)
+        let result = await task.value
         operation = nil
         return result
     }
@@ -138,10 +141,11 @@ extension AppModel {
 
     /// Moves items to the Trash through Finder, so its Put Back works.
     func moveToTrash(_ urls: [URL]) {
-        guard !urls.isEmpty, confirmMany(urls.count, action: "Move to Trash") else { return }
+        guard !urls.isEmpty, confirmMany(urls.count, action: String(localized: "Move to Trash")) else { return }
         let showsProgress = urls.count > 20 && operation == nil
         if showsProgress {
-            operation = FileOperationProgress(text: "Moving \(urls.count.formatted()) items to the Trash…", cancel: nil)
+            let text = String(localized: "Moving \(urls.count.formatted()) items to the Trash…")
+            operation = FileOperationProgress(text: text, stop: nil)
         }
         NSWorkspace.shared.recycle(urls) { [weak self] map, error in
             Task { @MainActor in
@@ -169,8 +173,8 @@ extension AppModel {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         Task {
             let total = urls.count
-            let (deleted, error) = await runInBackground("Deleting \(total.formatted()) items…") { cancel, update in
-                FileOperations.delete(urls, cancel: cancel) { number, url in
+            let (deleted, error) = await runInBackground("Deleting \(total.formatted()) items…") { update in
+                FileOperations.delete(urls) { number, url in
                     update("Deleting “\(url.lastPathComponent)” (\((number + 1).formatted()) of \(total.formatted()))…")
                 }
             }
@@ -185,7 +189,7 @@ extension AppModel {
     func duplicate(_ urls: [URL]) {
         guard !urls.isEmpty, confirmMany(urls.count, action: "Duplicate"), canStartOperation else { return }
         let name = urls.count == 1 ? "“\(urls[0].lastPathComponent)”" : "\(urls.count.formatted()) items"
-        operation = FileOperationProgress(text: "Duplicating \(name)…", cancel: nil)
+        operation = FileOperationProgress(text: "Duplicating \(name)…", stop: nil)
         NSWorkspace.shared.duplicate(urls) { [weak self] map, error in
             Task { @MainActor in
                 guard let self else { return }
@@ -208,8 +212,8 @@ extension AppModel {
         let folder = first.deletingLastPathComponent()
         let text = urls.count == 1 ? "Compressing “\(first.lastPathComponent)”…" : "Compressing \(urls.count.formatted()) items…"
         Task {
-            let result = await runInBackground(text) { cancel, _ in
-                Result { try FileOperations.compress(urls, into: folder, cancel: cancel) }
+            let result = await runInBackground(text) { _ in
+                Result { try FileOperations.compress(urls, into: folder) }
             }
             switch result {
             case .success(let archive): select([archive])
@@ -399,8 +403,8 @@ extension AppModel {
 
     // MARK: Paste
 
-    /// Copies, or with `moving` moves, the files on the pasteboard into the filtered folder.
-    func paste(moving: Bool) {
+    /// Copies the files on the pasteboard into the filtered folder.
+    func paste() {
         guard let folder = filters.folder, canStartOperation else { return }
         let sources = FileActions.pastedFiles()
         guard !sources.isEmpty else {
@@ -411,15 +415,13 @@ extension AppModel {
         var transfers: [FileOperations.Transfer] = []
         for source in sources {
             if source.deletingLastPathComponent().standardizedFileURL.path == destination.standardizedFileURL.path {
-                // Pasting where the item already is makes a copy, as in Finder; moving there does nothing.
-                if !moving {
-                    transfers.append(.init(source: source, destination: FileOperations.availableCopy(of: source, in: destination)))
-                }
+                // Pasting where the item already is makes a copy, as in Finder.
+                transfers.append(.init(source: source, destination: FileOperations.availableCopy(of: source, in: destination)))
                 continue
             }
             var transfer = FileOperations.Transfer(source: source, destination: destination.appendingPathComponent(source.lastPathComponent))
             if FileOperations.exists(transfer.destination) {
-                switch askAboutConflict(source.lastPathComponent, moving: moving) {
+                switch askAboutConflict(source.lastPathComponent) {
                 case .alertFirstButtonReturn: transfer.destination = FileOperations.available(transfer.destination)
                 case .alertThirdButtonReturn: transfer.replacing = true
                 default: return
@@ -430,24 +432,22 @@ extension AppModel {
         guard !transfers.isEmpty else { return }
         let planned = transfers
         Task {
-            let verb = moving ? "Moving" : "Copying"
             let total = planned.count
-            let outcome = await runInBackground("\(verb) \(total.formatted()) items…") { cancel, update in
-                FileOperations.transfer(planned, moving: moving, cancel: cancel) { number, transfer in
-                    update("\(verb) “\(transfer.source.lastPathComponent)” (\((number + 1).formatted()) of \(total.formatted()))…")
+            let outcome = await runInBackground("Copying \(total.formatted()) items…") { update in
+                FileOperations.copy(planned) { number, transfer in
+                    update("Copying “\(transfer.source.lastPathComponent)” (\((number + 1).formatted()) of \(total.formatted()))…")
                 }
             }
-            if moving { refreshIndex(outcome.done.map(\.source)) }
             select(outcome.done.map(\.destination))
             if let error = outcome.error { present(error) }
         }
     }
 
     /// Finder's question when an item is in the way: Keep Both, Stop or Replace, in that order.
-    private func askAboutConflict(_ name: String, moving: Bool) -> NSApplication.ModalResponse {
+    private func askAboutConflict(_ name: String) -> NSApplication.ModalResponse {
         let alert = NSAlert()
         alert.messageText = "An item named “\(name)” already exists in this location."
-        alert.informativeText = "Do you want to replace it with the one you’re \(moving ? "moving" : "copying")?"
+        alert.informativeText = "Do you want to replace it with the one you’re copying?"
         alert.addButton(withTitle: "Keep Both")
         alert.addButton(withTitle: "Stop")
         alert.addButton(withTitle: "Replace")

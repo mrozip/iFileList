@@ -38,6 +38,25 @@ final class AppModel {
             coordinator?.update(settings: indexSettings)
         }
     }
+    /// Closing the window leaves the app in the menu bar, keeping the index current.
+    var keepsRunningInMenuBar = AppModel.savedKeepsRunningInMenuBar {
+        didSet {
+            guard keepsRunningInMenuBar != oldValue else { return }
+            UserDefaults.standard.set(keepsRunningInMenuBar, forKey: Self.keepsRunningInMenuBarKey)
+            presenter.updateStatusItem()
+            presenter.updateActivationPolicy()
+        }
+    }
+    /// The system-wide shortcut that shows the window, or nil for none.
+    var globalShortcut = AppModel.savedGlobalShortcut {
+        didSet {
+            guard globalShortcut != oldValue else { return }
+            UserDefaults.standard.set(globalShortcut?.dictionary ?? [:], forKey: Self.globalShortcutKey)
+            registerGlobalShortcut()
+        }
+    }
+    /// Another app already uses `globalShortcut`, so it couldn't be registered.
+    private(set) var globalShortcutIsTaken = false
     private(set) var results: [EntryID] = []
     /// Increases each time `results` is replaced; the table reloads when it changes.
     private(set) var resultsVersion = 0
@@ -56,6 +75,7 @@ final class AppModel {
 
     @ObservationIgnored let index: FileIndex
     @ObservationIgnored let coordinator: IndexCoordinator?
+    @ObservationIgnored let presenter = WindowPresenter()
     @ObservationIgnored weak var listController: FileListController?
     /// Entries to select once the results include them, after an operation created them.
     @ObservationIgnored var pendingSelection: PendingSelection?
@@ -70,6 +90,12 @@ final class AppModel {
     @ObservationIgnored private var refreshPending = false
     @ObservationIgnored private var lastSearchStart = Date.distantPast
     @ObservationIgnored private var started = false
+    @ObservationIgnored private var windowIsVisible = false
+    /// The index changed while the window was closed; search again when it opens.
+    @ObservationIgnored private var resultsAreStale = false
+    /// Keeps App Nap from slowing a scan down while no window is open.
+    @ObservationIgnored private var indexingActivity: NSObjectProtocol?
+    @ObservationIgnored private var hotKey: GlobalHotKey?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var folderPaths: [EntryID: String] = [:]
     @ObservationIgnored private var icons = IconCache()
@@ -80,6 +106,8 @@ final class AppModel {
     private static let externalVolumesKey = "indexExternalVolumes"
     private static let networkVolumesKey = "indexNetworkVolumes"
     private static let excludedPathsKey = "excludedPaths"
+    private static let keepsRunningInMenuBarKey = "keepsRunningInMenuBar"
+    private static let globalShortcutKey = "globalShortcut"
 
     /// The sort the user last chose, or by name on first launch.
     private static var savedSortOrder: FileIndexKit.SortOrder {
@@ -95,6 +123,17 @@ final class AppModel {
             indexesExternalVolumes: defaults.bool(forKey: externalVolumesKey),
             indexesNetworkVolumes: defaults.bool(forKey: networkVolumesKey),
             excludedPaths: defaults.stringArray(forKey: excludedPathsKey) ?? [])
+    }
+
+    private static var savedKeepsRunningInMenuBar: Bool {
+        UserDefaults.standard.object(forKey: keepsRunningInMenuBarKey) as? Bool ?? true
+    }
+
+    /// The shortcut the user last recorded; ⌃⌥Space until they change it. An empty dictionary
+    /// means they removed it.
+    private static var savedGlobalShortcut: GlobalShortcut? {
+        guard let saved = UserDefaults.standard.dictionary(forKey: globalShortcutKey) else { return .defaultShortcut }
+        return GlobalShortcut(dictionary: saved)
     }
 
     init() {
@@ -118,12 +157,16 @@ final class AppModel {
         }
         relay.model = self
         if let failure { status.phase = .failed(failure) }
+        presenter.model = self
         observeWorkspace()
     }
 
     // MARK: Lifecycle
 
-    func windowAppeared() {
+    /// Starts indexing at launch, whether or not a window opens. Without Full Disk Access or a
+    /// cache, the window asks about access first and indexing waits for the answer.
+    func launch() {
+        registerGlobalShortcut()
         guard !started else { return }
         let hasCache = databaseURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
         if !hasFullDiskAccess && !hasCache && !UserDefaults.standard.bool(forKey: Self.skippedAccessKey) {
@@ -156,6 +199,34 @@ final class AppModel {
 
     func focusSearch() {
         searchFocusRequest += 1
+    }
+
+    func windowDidAppear() {
+        windowIsVisible = true
+        if resultsAreStale {
+            resultsAreStale = false
+            runSearch()
+        }
+    }
+
+    func windowDidDisappear() {
+        windowIsVisible = false
+    }
+
+    // MARK: Global shortcut
+
+    /// Stops the shortcut from firing while Settings records a new one.
+    var suspendsGlobalShortcut = false {
+        didSet { if suspendsGlobalShortcut != oldValue { registerGlobalShortcut() } }
+    }
+
+    private func registerGlobalShortcut() {
+        if hotKey == nil {
+            hotKey = GlobalHotKey { [weak self] in self?.presenter.toggleMainWindow() }
+        }
+        let shortcut = suspendsGlobalShortcut ? nil : globalShortcut
+        let registered = hotKey?.register(shortcut) ?? false
+        if !suspendsGlobalShortcut { globalShortcutIsTaken = shortcut != nil && !registered }
     }
 
     // MARK: Filters
@@ -233,6 +304,16 @@ final class AppModel {
         case .idle, .failed:
             engine.defersSorting = false
         }
+        switch newStatus.phase {
+        case .loading, .scanning:
+            if indexingActivity == nil {
+                indexingActivity = ProcessInfo.processInfo.beginActivity(
+                    options: .userInitiatedAllowingIdleSystemSleep, reason: "Indexing files")
+            }
+        case .starting, .idle, .failed:
+            if let indexingActivity { ProcessInfo.processInfo.endActivity(indexingActivity) }
+            indexingActivity = nil
+        }
         if newStatus.indexVersion != searchedVersion { refreshResults() }
     }
 
@@ -244,6 +325,10 @@ final class AppModel {
     /// a search in progress and runs at most once a second, so a steady stream of file system
     /// changes can't keep the user's own search from finishing.
     private func refreshResults() {
+        guard windowIsVisible else {
+            resultsAreStale = true
+            return
+        }
         if searchInFlight {
             refreshPending = true
             return
@@ -297,26 +382,31 @@ final class AppModel {
         }
     }
 
+    /// The status bar's text: how many items match once indexing is done.
     var statusText: String {
-        var text: String
+        guard case .idle = status.phase, !query.isEmpty || hasFilters else { return indexStatusText }
+        return withUnreadableCount("\(results.count.formatted()) of \(status.visibleEntries.formatted()) items")
+    }
+
+    /// What the index is doing, regardless of the search; the menu bar icon's menu shows it.
+    var indexStatusText: String {
         switch status.phase {
         case .starting:
-            text = started ? "Starting…" : "Waiting to start"
+            withUnreadableCount(started ? "Starting…" : "Waiting to start")
         case .loading(let entries):
-            text = "Loading file list… \(entries.formatted()) items"
+            withUnreadableCount("Loading file list… \(entries.formatted()) items")
         case .scanning(let volume, let entries):
-            text = "Indexing “\(volume)”… \(entries.formatted()) items found"
+            withUnreadableCount("Indexing “\(volume)”… \(entries.formatted()) items found")
         case .idle:
-            text = query.isEmpty && !hasFilters
-                ? "\(status.visibleEntries.formatted()) items"
-                : "\(results.count.formatted()) of \(status.visibleEntries.formatted()) items"
+            withUnreadableCount("\(status.visibleEntries.formatted()) items")
         case .failed(let message):
-            return message
+            message
         }
-        if status.unreadableDirectories > 0 {
-            text += " · \(status.unreadableDirectories.formatted()) folders unreadable"
-        }
-        return text
+    }
+
+    private func withUnreadableCount(_ text: String) -> String {
+        guard status.unreadableDirectories > 0 else { return text }
+        return text + " · \(status.unreadableDirectories.formatted()) folders unreadable"
     }
 
     // MARK: Rows

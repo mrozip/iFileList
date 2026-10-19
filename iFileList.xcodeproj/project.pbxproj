@@ -96,6 +96,7 @@
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				en,
+				"en-GB",
 				Base,
 			);
 			mainGroup = 1F0000000000000000000004;
@@ -193,18 +194,16 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = iFileList/iFileList.entitlements;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = iFileList;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSAppleEventsUsageDescription = "iFileList asks Finder to show the Get Info window for files you choose.";
 				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "iFileList lists the files in your Desktop folder so you can search them.";
 				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "iFileList lists the files in your Documents folder so you can search them.";
 				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "iFileList lists the files in your Downloads folder so you can search them.";
@@ -214,7 +213,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.3.0;
+				MARKETING_VERSION = 0.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.mrozip.iFileList;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -227,18 +226,16 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = iFileList/iFileList.entitlements;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = iFileList;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSAppleEventsUsageDescription = "iFileList asks Finder to show the Get Info window for files you choose.";
 				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "iFileList lists the files in your Desktop folder so you can search them.";
 				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "iFileList lists the files in your Documents folder so you can search them.";
 				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "iFileList lists the files in your Downloads folder so you can search them.";
@@ -248,7 +245,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.3.0;
+				MARKETING_VERSION = 0.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.mrozip.iFileList;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

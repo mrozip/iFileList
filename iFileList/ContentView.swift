@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -54,8 +55,23 @@ struct ContentView: View {
         .fileDialogDefaultDirectory(model.filters.folder.map { URL(fileURLWithPath: $0, isDirectory: true) })
         .searchable(text: $model.query, placement: .toolbar, prompt: "Search")
         .searchFocused($searchFocused)
-        .onChange(of: model.searchFocusRequest) { searchFocused = true }
-        .onAppear { model.windowAppeared() }
+        .onChange(of: model.searchFocusRequest) { focusSearchField() }
+        .onAppear {
+            // After the window has set up its first responder, so the list doesn't take focus back.
+            Task { @MainActor in focusSearchField() }
+        }
+    }
+
+    /// Puts the cursor in the search field with the query selected, so typing replaces it.
+    private func focusSearchField() {
+        guard !model.showsAccessOnboarding else { return }
+        searchFocused = true
+        // Once the field editor has taken over.
+        Task { @MainActor in
+            guard let editor = NSApp.keyWindow?.firstResponder as? NSText, editor.delegate is NSSearchField
+            else { return }
+            editor.selectAll(nil)
+        }
     }
 
     private static func isFolder(_ url: URL) -> Bool {
@@ -105,8 +121,8 @@ private struct StatusBar: View {
                 Text(operation.text)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                if let cancel = operation.cancel {
-                    Button("Stop") { cancel.cancel() }
+                if let stop = operation.stop {
+                    Button("Stop", action: stop)
                         .buttonStyle(.link)
                 }
             } else {

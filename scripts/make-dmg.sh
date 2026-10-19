@@ -19,9 +19,7 @@ xcodebuild -project iFileList.xcodeproj -scheme iFileList -configuration Release
     -derivedDataPath "$derived" ONLY_ACTIVE_ARCH=NO clean build
 
 if [[ -n "${SIGN_IDENTITY:-}" ]]; then
-    codesign --force --options runtime --timestamp \
-        --entitlements iFileList/iFileList.entitlements \
-        --sign "$SIGN_IDENTITY" "$app"
+    codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$app"
 fi
 codesign --verify --strict "$app"
 

@@ -40,6 +40,8 @@ struct FileTargets {
     /// Every item is in the same folder. False above `inspectionLimit`, where it isn't checked.
     let sharesParent: Bool
     let containsVolumeRoot: Bool
+    /// Some item is in the Trash, so it can't be moved there again.
+    let containsTrashed: Bool
     /// The one item is a symbolic link or a Finder alias.
     let isLink: Bool
 
@@ -70,6 +72,8 @@ struct FileTargets {
         sharesParent = inspectedAll && !snapshots.isEmpty
             && snapshots.allSatisfy { $0.parent == snapshots[0].parent && !$0.flags.contains(.volumeRoot) }
         containsVolumeRoot = snapshots.contains { $0.flags.contains(.volumeRoot) }
+        let folders = Set(snapshots.filter { !$0.flags.contains(.volumeRoot) }.map(\.parent))
+        containsTrashed = folders.contains { index?.path(of: $0).map(FileOperations.isInTrash) == true }
         if count == 1, let first, let index {
             isLink = first.flags.contains(.symlink)
                 || (!first.isDirectory && index.path(of: first.id).map(Self.isAlias) == true)
@@ -154,7 +158,8 @@ enum FileCommand: Int, CaseIterable {
         return switch self {
         case .open, .showInFinder, .getInfo, .makeAlias, .quickLook, .copy, .copyPathname: true
         case .rename: targets.count == 1 && !targets.containsVolumeRoot
-        case .compress, .duplicate, .moveToTrash, .deleteImmediately: !targets.containsVolumeRoot
+        case .compress, .duplicate, .deleteImmediately: !targets.containsVolumeRoot
+        case .moveToTrash: !targets.containsVolumeRoot && !targets.containsTrashed
         case .showOriginal: targets.isLink
         case .eject: targets.count == 1 && targets.containsVolumeRoot && targets.first?.name != "/"
         case .newFolderWithSelection: targets.sharesParent

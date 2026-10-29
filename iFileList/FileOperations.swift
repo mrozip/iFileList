@@ -1,4 +1,5 @@
 import AppKit
+import FileIndexKit
 
 /// File system changes behind the File and Edit menus. Everything here is synchronous and safe
 /// to run off the main actor; `AppModel` decides where each one runs. The long ones stop between
@@ -170,6 +171,18 @@ enum FileOperations {
                 NSLocalizedFailureReasonErrorKey: message.trimmingCharacters(in: .whitespacesAndNewlines),
             ])
         }
+    }
+
+    // MARK: Trash
+
+    /// The user's Trash on the startup disk, under the path the index lists it by.
+    private static let homeTrash = VolumeCatalog.canonicalPath(
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".Trash").path)
+
+    /// Whether items in `folder` are in a Trash: the user's own, or the `.Trashes` folder of
+    /// another volume. Items are put back from Finder's Trash, since there's no API for it.
+    static func isInTrash(folder: String) -> Bool {
+        folder == homeTrash || folder.hasPrefix(homeTrash + "/") || folder.contains("/.Trashes/")
     }
 
     // MARK: Tags

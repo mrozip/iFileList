@@ -218,12 +218,17 @@ struct FileTableView: NSViewRepresentable {
                 cell.imageView?.image = nil
                 return cell
             }
+            // Set for every row, since cells are reused.
+            let isInTrash = model.isInTrash(entry)
+            cell.textField?.textColor = isInTrash ? .tertiaryLabelColor
+                : column == .name ? .labelColor : .secondaryLabelColor
             switch column {
             case .name:
                 cell.textField?.stringValue = model.displayName(entry)
                 cell.textField?.isEditable = !entry.flags.contains(.volumeRoot)
                 cell.textField?.delegate = self
                 cell.imageView?.image = model.icon(for: entry)
+                cell.imageView?.alphaValue = isInTrash ? 0.4 : 1
             case .folder:
                 cell.textField?.stringValue = model.folderPath(of: entry)
             case .size:
@@ -271,7 +276,6 @@ struct FileTableView: NSViewRepresentable {
             text.translatesAutoresizingMaskIntoConstraints = false
             text.lineBreakMode = column == .folder ? .byTruncatingMiddle : .byTruncatingTail
             text.alignment = column == .size ? .right : .natural
-            text.textColor = column == .name ? .labelColor : .secondaryLabelColor
             text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             cell.addSubview(text)
             cell.textField = text
@@ -327,7 +331,7 @@ struct FileTableView: NSViewRepresentable {
             add([.open], to: menu)
             menu.addItem(submenus.openWithItem())
             menu.addItem(.separator())
-            add([.moveToTrash], to: menu)
+            add([.moveToTrash], to: menu, showingUnavailable: targets.containsTrashed)
             menu.addItem(.separator())
             add([.getInfo, .rename, .compress, .duplicate, .makeAlias, .quickLook, .showOriginal], to: menu)
             menu.addItem(.separator())
@@ -345,10 +349,16 @@ struct FileTableView: NSViewRepresentable {
             add([.eject], to: menu)
         }
 
-        private func add(_ commands: [FileCommand], to menu: NSMenu) {
-            for command in commands where command.isAvailable(for: menuTargets) {
+        /// Adds the commands that are available. With `showingUnavailable`, the others are added
+        /// greyed out instead of left out.
+        private func add(_ commands: [FileCommand], to menu: NSMenu, showingUnavailable: Bool = false) {
+            for command in commands {
+                let isAvailable = command.isAvailable(for: menuTargets)
+                guard isAvailable || showingUnavailable else { continue }
+                // The menu enables items by their action, so an item without one shows greyed out.
                 let item = NSMenuItem(
-                    title: command.title(for: menuTargets), action: #selector(performFromMenu(_:)), keyEquivalent: "")
+                    title: command.title(for: menuTargets), action: isAvailable ? #selector(performFromMenu(_:)) : nil,
+                    keyEquivalent: "")
                 item.target = self
                 item.tag = command.rawValue
                 menu.addItem(item)

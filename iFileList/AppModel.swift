@@ -439,6 +439,11 @@ final class AppModel {
         return path
     }
 
+    /// Items in the Trash are shown greyed out and can't be moved to it again.
+    func isInTrash(_ entry: EntrySnapshot) -> Bool {
+        !entry.flags.contains(.volumeRoot) && FileOperations.isInTrash(folder: folderPath(of: entry))
+    }
+
     func icon(for entry: EntrySnapshot) -> NSImage {
         icons.icon(for: entry) { [index] in index.path(of: entry.id) }
     }
